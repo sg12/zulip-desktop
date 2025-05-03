@@ -1,21 +1,21 @@
-import type {WebContents} from "electron/main";
+import type { WebContents } from "electron/main";
 import fs from "node:fs";
 import process from "node:process";
 
 import * as remote from "@electron/remote";
-import {app, dialog} from "@electron/remote";
+import { app, dialog } from "@electron/remote";
 
 import * as ConfigUtil from "../../../common/config-util.js";
-import {type Html, html} from "../../../common/html.js";
+import { type Html, html } from "../../../common/html.js";
 import * as t from "../../../common/translation-util.js";
-import type {RendererMessage} from "../../../common/typed-ipc.js";
-import type {TabRole} from "../../../common/types.js";
+import type { RendererMessage } from "../../../common/typed-ipc.js";
+import type { TabRole } from "../../../common/types.js";
 import preloadCss from "../../css/preload.css?raw";
-import {ipcRenderer} from "../typed-ipc-renderer.js";
+import { ipcRenderer } from "../typed-ipc-renderer.js";
 import * as SystemUtil from "../utils/system-util.js";
 
-import {generateNodeFromHtml} from "./base.js";
-import {contextMenu} from "./context-menu.js";
+import { generateNodeFromHtml } from "./base.js";
+import { contextMenu } from "./context-menu.js";
 
 const shouldSilentWebview = ConfigUtil.getConfigItem("silent", false);
 
@@ -56,8 +56,9 @@ export default class WebView {
           ${properties.preload === undefined
             ? html``
             : html`preload="${properties.preload}"`}
-          partition="persist:webviewsession"
+          partition="temp:incognito"
           allowpopups
+          webpreferences="nodeIntegrationInSubFrames=true,contextIsolation=false"
         >
         </webview>
       </div>
@@ -271,6 +272,146 @@ export default class WebView {
       this.loading = false;
       this.properties.switchLoading(false, this.properties.url);
       this.show();
+      this.getWebContents().executeJavaScript(`
+          // Глобальный обработчик ошибок
+          window.onerror = function(message, source, lineno, colno, error) {
+              console.error('WebView: Ошибка:', message, 'в', source, 'строка', lineno, 'столбец', colno, 'error:', error);
+          };
+  
+          // Обработчик необработанных промисов
+          window.addEventListener('unhandledrejection', (event) => {
+              console.error('WebView: Необработанный промис:', event.reason);
+          });
+  
+          // Отладка окружения
+          console.log('WebView: electron_bridge доступен:', !!window.electron_bridge);
+          console.log('WebView: ipcRenderer доступен:', !!window.ipcRenderer);
+          console.log('WebView: JitsiMeetJS доступен:', !!window.JitsiMeetJS);
+          console.log('WebView: User-Agent:', navigator.userAgent);
+  
+          // Установка индикаторов Electron
+          window.isElectron = true;
+          window.electron = { version: '32.3.0' };
+          console.log('WebView: Установлен isElectron:', window.isElectron);
+          console.log('WebView: Установлен electron:', window.electron);
+  
+          // Имитация JitsiMeetScreenObtainer
+          window.JitsiMeetScreenObtainer = {
+              openDesktopPicker: async (options, onSuccess, onFailure) => {
+                  console.log('WebView: JitsiMeetScreenObtainer.openDesktopPicker called with options:', options);
+                  try {
+                      const sources = await window.ipcRenderer.invoke('get-desktop-sources');
+                      console.log('WebView: Источники от desktopCapturer:', sources);
+                      if (sources && sources.length > 0) {
+                          onSuccess(sources[0].id, 'screen', false);
+                      } else {
+                          onFailure(new Error('No sources selected'));
+                      }
+                  } catch (error) {
+                      console.error('WebView: Ошибка в openDesktopPicker:', error);
+                      onFailure(error);
+                  }
+              }
+          };
+          console.log('WebView: JitsiMeetScreenObtainer установлен:', !!window.JitsiMeetScreenObtainer);
+  
+          // Перехват Jitsi API
+          (function() {
+              // Перехват getDisplayMedia
+              const originalGetDisplayMedia = navigator.mediaDevices.getDisplayMedia;
+              navigator.mediaDevices.getDisplayMedia = async function(constraints) {
+                  console.log('WebView: getDisplayMedia called with constraints:', JSON.stringify(constraints));
+                  try {
+                      const sources = await window.ipcRenderer.invoke('get-desktop-sources');
+                      console.log('WebView: Источники от desktopCapturer:', sources);
+                      return navigator.mediaDevices.getUserMedia({
+                          video: {
+                              mandatory: {
+                                  chromeMediaSource: 'desktop',
+                                  chromeMediaSourceId: sources[0].id,
+                              },
+                          },
+                      });
+                  } catch (error) {
+                      console.error('WebView: Ошибка в getDisplayMedia:', error);
+                      throw error;
+                  }
+              };
+  
+              // Перехват JitsiMeetJS
+              Object.defineProperty(window, 'JitsiMeetJS', {
+                  get() {
+                      console.log('WebView: JitsiMeetJS accessed');
+                      return this._jitsiMeetJS;
+                  },
+                  set(value) {
+                      console.log('WebView: JitsiMeetJS initialized');
+                      this._jitsiMeetJS = value;
+  
+                      // Перехват browser.isElectron
+                      value.browser = value.browser || {};
+                      const originalIsElectron = value.browser.isElectron;
+                      value.browser.isElectron = function() {
+                          console.log('WebView: browser.isElectron called, returning true');
+                          return true;
+                      };
+  
+                      // Перехват _createObtainStreamMethod
+                      if (value.desktopSharing) {
+                          const originalCreateObtainStreamMethod = value.desktopSharing._createObtainStreamMethod;
+                          value.desktopSharing._createObtainStreamMethod = function() {
+                              console.log('WebView: _createObtainStreamMethod called, forcing obtainScreenOnElectron');
+                              return this.obtainScreenOnElectron;
+                          };
+                          console.log('WebView: _createObtainStreamMethod перехвачен');
+                      }
+  
+                      // Перехват createLocalTracks
+                      const originalCreateLocalTracks = value.createLocalTracks;
+                      value.createLocalTracks = async function(options) {
+                          console.log('WebView: Jitsi createLocalTracks called with options:', JSON.stringify(options));
+                          if (options.devices && options.devices.includes('desktop')) {
+                              console.log('WebView: Jitsi пытается запустить демонстрацию экрана');
+                              try {
+                                  const sources = await window.ipcRenderer.invoke('get-desktop-sources');
+                                  console.log('WebView: Источники от desktopCapturer для Jitsi:', sources);
+                                  return [{
+                                      deviceId: sources[0].id,
+                                      kind: 'video',
+                                      label: sources[0].name,
+                                      getSettings: () => ({ deviceId: sources[0].id }),
+                                      getConstraints: () => ({
+                                          mandatory: {
+                                              chromeMediaSource: 'desktop',
+                                              chromeMediaSourceId: sources[0].id,
+                                          },
+                                      }),
+                                  }];
+                              } catch (error) {
+                                  console.error('WebView: Ошибка в createLocalTracks:', error);
+                                  throw error;
+                              }
+                          }
+                          return originalCreateLocalTracks.apply(this, arguments);
+                      };
+                  }
+              });
+          })();
+  
+          // Отладка создания iframe
+          const observer = new MutationObserver((mutations) => {
+              mutations.forEach(mutation => {
+                  mutation.addedNodes.forEach(node => {
+                      if (node.nodeName === 'IFRAME') {
+                          console.log('WebView: Обнаружен iframe:', node.src);
+                      }
+                  });
+              });
+          });
+          observer.observe(document.body, { childList: true, subtree: true });
+      `);
+      // Открыть DevTools для WebView
+      this.getWebContents().openDevTools();
     });
 
     webContents.on("did-fail-load", (_event, _errorCode, errorDescription) => {

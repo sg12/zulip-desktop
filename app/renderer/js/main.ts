@@ -312,10 +312,12 @@ export class ServerManagerView {
       }
     }
   }
-
+//localhost:9991
+//https://joinrm-svz.ru/
+//https://connectrm-svz.ru/
   async initTabs(): Promise<void> {
     const server = {
-      url: "https://connectrm-svz.ru",
+      url: "https://joinrm-svz.ru/",
       alias: "Цифровые технологии РМ",
       icon: "https://disk.yandex.ru/i/m2aj56OOhsJfyw",
     } as ServerConfig;
@@ -975,4 +977,50 @@ window.addEventListener("load", async () => {
 
   const serverManagerView = new ServerManagerView();
   await serverManagerView.init();
+
+  // const redButton = document.createElement("button");
+  // redButton.id = "red-button";
+  // redButton.textContent = "Click Me";
+  // redButton.style.cssText = `
+  //   position: absolute;
+  //   top: 10px;
+  //   left: 50%;
+  //   transform: translateX(-50%);
+  //   width: 200px;
+  //   height: 100px;
+  //   background-color: red;
+  //   color: white;
+  //   font-size: 24px;
+  //   border: none;
+  //   border-radius: 10px;
+  //   cursor: pointer;
+  //   z-index: 1000;
+  // `;
+
+  // document.body.appendChild(redButton);
+
+  // redButton.addEventListener("click", async () => {
+  //   console.log("RRRR-click");
+  //   try {
+  //     console.log('Запуск DesktopPicker для демонстрации экрана...');
+  //     ipcRenderer.send('open-desktop-picker');
+  //     console.log('DesktopPicker успешно вызван, ожидаем выбор пользователя...');
+  
+  //     // Listen for sources from the main process
+  //     ipcRenderer.on('desktop-sources-response', (event, { sources, error }) => {
+  //       if (error) {
+  //         console.error('Ошибка получения источников:', error);
+  //         return;
+  //       }
+  //       console.log('Renderer: Получены источники для демонстрации:', sources);
+  //       // Pass sources to Jitsi or other logic
+  //     });
+  
+  //     // Request sources directly via IPC
+  //     const sources = await ipcRenderer.invoke('get-desktop-sources');
+  //     console.log('Renderer: Прямой вызов источников:', sources);
+  //   } catch (error) {
+  //     console.error('Ошибка при вызове DesktopPicker:', error);
+  //   }
+  // });
 });
