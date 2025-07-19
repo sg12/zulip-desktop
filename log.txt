@@ -1,78 +1,1262 @@
-Debugger attached.
 [33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
 
-  [32m[1mVITE[22m v5.4.19[39m  [2mready in [0m[1m451[22m[2m[0m ms[22m
+  VITE v5.4.19  ready in 281 ms
 
-  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
-[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
-[2m[32m  ➜[39m[22m[2m  press [22m[1mh + enter[22m[2m to show help[22m
-[36mvite v5.4.19 [32mbuilding SSR bundle for development...[36m[39m
-[36m
-watching for file changes...[39m
-[36mvite v5.4.19 [32mbuilding for development...[36m[39m
-[36m
-watching for file changes...[39m
-[36mvite v5.4.19 [32mbuilding for development...[36m[39m
-[36m
-watching for file changes...[39m
-[36m
-build started...[39m
-[36m
-build started...[39m
-[36m
-build started...[39m
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+  ➜  press h + enter to show help
+vite v5.4.19 building SSR bundle for development...
+
+watching for file changes...
+vite v5.4.19 building for development...
+
+watching for file changes...
+vite v5.4.19 building for development...
+
+watching for file changes...
+
+build started...
+
+build started...
+
+build started...
 transforming...
 transforming...
 transforming...
-[32m✓[39m 6 modules transformed.
+✓ 6 modules transformed.
 rendering chunks...
 computing gzip size...
-[2mdist-electron/[22m[36mpreload.js  [39m[1m[2m38.34 kB[22m[1m[22m[2m │ gzip: 12.63 kB[22m[2m │ map: 21.11 kB[22m
-[36mbuilt in 1138ms.[39m
-[32m✓[39m 406 modules transformed.
+dist-electron/preload.js  40.10 kB │ gzip: 13.23 kB │ map: 22.02 kB
+built in 878ms.
+✓ 406 modules transformed.
 rendering chunks...
 computing gzip size...
-[2mdist-electron/[22m[36mrenderer.js  [39m[1m[33m790.67 kB[39m[22m[2m │ gzip: 169.05 kB[22m[2m │ map: 1,684.13 kB[22m
-[36mbuilt in 4479ms.[39m
-[32m✓[39m 1551 modules transformed.
+dist-electron/renderer.js  792.86 kB │ gzip: 169.48 kB │ map: 1,688.26 kB
+built in 4273ms.
+✓ 1547 modules transformed.
 rendering chunks...
-[2mdist-electron/[22m[36mindex.js  [39m[1m[33m1,680.45 kB[39m[22m[2m │ map: 4,144.99 kB[22m
-[36mbuilt in 10796ms.[39m
-
-Debugger attached.
+dist-electron/index.js  1,685.05 kB │ map: 4,149.31 kB
+built in 8285ms.
 🖼 Создаём окно...
-mainUrl: file://C:\Users\User\Documents\IDE\zulip-desktop\zulip-desktop\dist-electron\app\renderer\main.html
+mainUrl: file:///Users/sg12/zulip-desktop/dist-electron/app/renderer/main.html
+[41817:0720/023928.001081:ERROR:system_services.cc(34)] SetApplicationIsDaemon: Error Domain=NSOSStatusErrorDomain Code=-50 "paramErr: error in user parameter list" (-50)
+[41809:0720/023928.304318:ERROR:CONSOLE(1)] "Request Autofill.enable failed. {"code":-32601,"message":"'Autofill.enable' wasn't found"}", source: devtools://devtools/bundled/core/protocol_client/protocol_client.js (1)
+[41809:0720/023928.304422:ERROR:CONSOLE(1)] "Request Autofill.setAddresses failed. {"code":-32601,"message":"'Autofill.setAddresses' wasn't found"}", source: devtools://devtools/bundled/core/protocol_client/protocol_client.js (1)
 ✅ Окно создано!
 ✅ Окно создано!
 ✅ Окно создано!-1
 ✅ Окно создано!-2
-[16:41:15] Main: WebView будет создан с preload: C:\Users\User\Documents\IDE\zulip-desktop\zulip-desktop\dist-electron\preload.js, URL: https://connectrm-svz.ru/
-[16:41:15] Preload Log: ✅ Preload: Начало выполнения
+[02:39:28] Main: WebView будет создан с preload: /Users/sg12/zulip-desktop/dist-electron/preload.js, URL: https://joinrm-svz.ru/
+[02:39:30] Preload Log: ✅ Preload: Начало выполнения
 Preload Log: ✅ Preload: Начало выполнения
-[16:41:15] Preload Log: ✅ Preload: Загружен для URL: https://connectrm-svz.ru/login/
-Preload Log: ✅ Preload: Загружен для URL: https://connectrm-svz.ru/login/
-[16:41:15] Preload Log: ✅ Preload: ipcRenderer.send: function, ipcRenderer.invoke: function
+[02:39:30] Preload Log: ✅ Preload: Загружен для URL: https://joinrm-svz.ru/
+Preload Log: ✅ Preload: Загружен для URL: https://joinrm-svz.ru/
+[02:39:30] Preload Log: ✅ Preload: ipcRenderer.send: function, ipcRenderer.invoke: function
 Preload Log: ✅ Preload: ipcRenderer.send: function, ipcRenderer.invoke: function
-[16:41:15] Preload Log: ✅ Preload: Регистрация обработчика toggle-walkie-talkie
+[02:39:30] Preload Log: ✅ Preload: Starting exposure of nativeScreenCapture
+Preload Log: ✅ Preload: Starting exposure of nativeScreenCapture
+[02:39:30] Preload Log: ✅ Preload: nativeScreenCapture exposed
+Preload Log: ✅ Preload: nativeScreenCapture exposed
+[02:39:30] Preload Log: ✅ Preload: Регистрация обработчика toggle-walkie-talkie
 Preload Log: ✅ Preload: Регистрация обработчика toggle-walkie-talkie
-[16:41:39] Preload Log: ✅ Preload: Начало выполнения
-Preload Log: ✅ Preload: Начало выполнения
-[16:41:39] Preload Log: ✅ Preload: Загружен для URL: https://connectrm-svz.ru/
-Preload Log: ✅ Preload: Загружен для URL: https://connectrm-svz.ru/
-[16:41:39] Preload Log: ✅ Preload: ipcRenderer.send: function, ipcRenderer.invoke: function
-Preload Log: ✅ Preload: ipcRenderer.send: function, ipcRenderer.invoke: function
-[16:41:39] Preload Log: ✅ Preload: Регистрация обработчика toggle-walkie-talkie
-Preload Log: ✅ Preload: Регистрация обработчика toggle-walkie-talkie
-[16:41:41] Preload Log: Bridge: Установка слушателя события: logout
+[02:39:30] Preload Log: ✅ Preload: Script completed execution
+Preload Log: ✅ Preload: Script completed execution
+[02:39:34] Preload Log: Bridge: Отправлено событие: total_unread_count [23]
+Preload Log: Bridge: Отправлено событие: total_unread_count [23]
+[02:39:34] Preload Log: Bridge: Установка слушателя события: logout
 Preload Log: Bridge: Установка слушателя события: logout
-[16:41:41] Preload Log: Bridge: Установка слушателя события: show-keyboard-shortcuts
+[02:39:34] Preload Log: Bridge: Установка слушателя события: show-keyboard-shortcuts
 Preload Log: Bridge: Установка слушателя события: show-keyboard-shortcuts
-[16:41:41] Preload Log: Bridge: Установка слушателя события: show-notification-settings
+[02:39:34] Preload Log: Bridge: Установка слушателя события: show-notification-settings
 Preload Log: Bridge: Установка слушателя события: show-notification-settings
-[16:41:41] Preload Log: Bridge: Установка слушателя события: open-desktop-picker
+[02:39:34] Preload Log: Bridge: Установка слушателя события: open-desktop-picker
 Preload Log: Bridge: Установка слушателя события: open-desktop-picker
-[16:41:41] Preload Log: Bridge: Установка слушателя события: send_notification_reply_message
+[02:39:34] Preload Log: Bridge: Установка слушателя события: requestDesktopSources
+Preload Log: Bridge: Установка слушателя события: requestDesktopSources
+[02:39:34] Preload Log: Bridge: Установка слушателя события: walkie-talkie-status
+Preload Log: Bridge: Установка слушателя события: walkie-talkie-status
+[02:39:34] Preload Log: Bridge: Установка слушателя события: toggle-walkie-talkie
+Preload Log: Bridge: Установка слушателя события: toggle-walkie-talkie
+[02:39:34] Preload Log: Bridge: Установка слушателя события: send_notification_reply_message
 Preload Log: Bridge: Установка слушателя события: send_notification_reply_message
-Waiting for the debugger to disconnect...
-�訡��: �� 㤠���� ���� ����� "1204".
-Waiting for the debugger to disconnect...
+[02:39:43] Main: Handling select-source-with-picker
+selectSourceWithPicker called
+On main thread, showing tabbed test alert
+Tabbed alert response: NSModalResponse(rawValue: 1000)
+Microphone access granted
+Folder /Users/sg12/Movies is accessible
+Video input added to AVAssetWriter
+Audio input added to AVAssetWriter
+AVAssetWriter started writing
+AVAudioFile for microphone created: /Users/sg12/Movies/MicCapture.m4a
+Microphone audio input added
+Microphone audio output added
+AVCaptureSession started, state: true
+Video and audio capture started
+Audio buffer appended, time: 0.0
+Audio buffer appended, time: 0.019990787
+Video buffer appended, time: 0.075121311
+Audio buffer appended, time: 0.040002409
+Audio buffer appended, time: 0.059993197
+Audio buffer appended, time: 0.079999007
+Video buffer appended, time: 0.14450115
+Audio buffer appended, time: 0.099989796
+Audio buffer appended, time: 0.120001416
+Video buffer appended, time: 0.179638807
+Audio buffer appended, time: 0.139992205
+Video buffer appended, time: 0.214737784
+Audio buffer appended, time: 0.160003826
+Audio buffer appended, time: 0.179994614
+Video buffer appended, time: 0.250329063
+Audio buffer appended, time: 0.200000424
+Audio buffer appended, time: 0.219991212
+Audio buffer appended, time: 0.240002834
+Video buffer appended, time: 0.321741619
+Audio buffer appended, time: 0.259993621
+Audio buffer appended, time: 0.279993621
+Video buffer appended, time: 0.341706076
+Audio buffer appended, time: 0.300005243
+Audio buffer appended, time: 0.319996031
+Microphone buffer written, time: 0.364679577
+Audio buffer appended, time: 0.339986819
+Microphone buffer written, time: 0.384679577
+Video buffer appended, time: 0.409606358
+Audio buffer appended, time: 0.35999263
+Microphone buffer written, time: 0.404679577
+Audio buffer appended, time: 0.380004251
+Video buffer appended, time: 0.444382493
+Microphone buffer written, time: 0.424679577
+Audio buffer appended, time: 0.399995039
+Microphone buffer written, time: 0.444679577
+Audio buffer appended, time: 0.419985826
+Microphone buffer written, time: 0.464679577
+Audio buffer appended, time: 0.439997448
+Microphone buffer written, time: 0.484679577
+Microphone buffer written, time: 0.504679577
+Audio buffer appended, time: 0.459988236
+Audio buffer appended, time: 0.479994047
+Microphone buffer written, time: 0.524679577
+Video buffer appended, time: 0.546948866
+Audio buffer appended, time: 0.500005668
+Microphone buffer written, time: 0.544679577
+Video buffer appended, time: 0.581870811
+Audio buffer appended, time: 0.519996456
+Microphone buffer written, time: 0.564679577
+Microphone buffer written, time: 0.584679577
+Audio buffer appended, time: 0.539987244
+Microphone buffer written, time: 0.604679577
+Audio buffer appended, time: 0.559998865
+Microphone buffer written, time: 0.624679577
+Video buffer appended, time: 0.650779283
+Audio buffer appended, time: 0.579989653
+Audio buffer appended, time: 0.599989653
+Microphone buffer written, time: 0.644679577
+Audio buffer appended, time: 0.619995463
+Video buffer appended, time: 0.684094806
+Microphone buffer written, time: 0.664679577
+Audio buffer appended, time: 0.639986252
+Video buffer appended, time: 0.703775085
+Microphone buffer written, time: 0.684679577
+Audio buffer appended, time: 0.659997873
+Microphone buffer written, time: 0.704679577
+Audio buffer appended, time: 0.679988661
+Video buffer appended, time: 0.738195839
+Microphone buffer written, time: 0.724679577
+Audio buffer appended, time: 0.700000282
+Microphone buffer written, time: 0.744679577
+Video buffer appended, time: 0.772334077
+Audio buffer appended, time: 0.719991071
+Microphone buffer written, time: 0.764679577
+Audio buffer appended, time: 0.739996881
+Microphone buffer written, time: 0.784679577
+Audio buffer appended, time: 0.759987668
+Microphone buffer written, time: 0.804679577
+Audio buffer appended, time: 0.77999929
+Video buffer appended, time: 0.842122017
+Microphone buffer written, time: 0.824679577
+Audio buffer appended, time: 0.799990078
+Microphone buffer written, time: 0.844679577
+Video buffer appended, time: 0.876166654
+Microphone buffer written, time: 0.864679577
+Audio buffer appended, time: 0.820001699
+Video buffer appended, time: 0.903585449
+Microphone buffer written, time: 0.884679577
+Audio buffer appended, time: 0.839992487
+Audio buffer appended, time: 0.859998298
+Microphone buffer written, time: 0.904679577
+Video buffer appended, time: 0.937402323
+Audio buffer appended, time: 0.879989086
+Microphone buffer written, time: 0.924679577
+Microphone buffer written, time: 0.944679577
+Audio buffer appended, time: 0.900000708
+Audio buffer appended, time: 0.920000708
+Microphone buffer written, time: 0.964679577
+Audio buffer appended, time: 0.956059807
+Video buffer appended, time: 1.003855591
+Microphone buffer written, time: 0.984679577
+Microphone buffer written, time: 1.004679577
+Audio buffer appended, time: 0.976050594
+Video buffer appended, time: 1.041256275
+Microphone buffer written, time: 1.024679577
+Audio buffer appended, time: 0.996062216
+Microphone buffer written, time: 1.044679577
+Audio buffer appended, time: 1.016053004
+Microphone buffer written, time: 1.064679577
+Audio buffer appended, time: 1.036064625
+Microphone buffer written, time: 1.084679577
+Video buffer appended, time: 1.108158982
+Audio buffer appended, time: 1.056055413
+Microphone buffer written, time: 1.104679577
+Audio buffer appended, time: 1.076061224
+Microphone buffer written, time: 1.124679577
+Video buffer appended, time: 1.145655523
+Audio buffer appended, time: 1.096052012
+Microphone buffer written, time: 1.144679577
+Audio buffer appended, time: 1.116063634
+Video buffer appended, time: 1.179094918
+Microphone buffer written, time: 1.164679577
+Audio buffer appended, time: 1.136054421
+Microphone buffer written, time: 1.184679577
+Video buffer appended, time: 1.212054464
+Audio buffer appended, time: 1.156066043
+Microphone buffer written, time: 1.204679577
+Microphone buffer written, time: 1.224679577
+Video buffer appended, time: 1.24573049
+Audio buffer appended, time: 1.176056831
+Audio buffer appended, time: 1.196062641
+Microphone buffer written, time: 1.244679577
+Audio buffer appended, time: 1.21605343
+Microphone buffer written, time: 1.264679577
+Audio buffer appended, time: 1.23606505
+Audio buffer appended, time: 1.25606505
+Microphone buffer written, time: 1.284679577
+Video buffer appended, time: 1.312331326
+Microphone buffer written, time: 1.304679577
+Audio buffer appended, time: 1.276055837
+Microphone buffer written, time: 1.324679577
+Audio buffer appended, time: 1.296067459
+Microphone buffer written, time: 1.344679577
+Video buffer appended, time: 1.364799565
+Audio buffer appended, time: 1.316058246
+Video buffer appended, time: 1.383434938
+Microphone buffer written, time: 1.364679577
+Audio buffer appended, time: 1.336064057
+Microphone buffer written, time: 1.384679577
+Audio buffer appended, time: 1.356054845
+Video buffer appended, time: 1.416591153
+Microphone buffer written, time: 1.404679577
+Audio buffer appended, time: 1.376066466
+Microphone buffer written, time: 1.424679577
+Video buffer appended, time: 1.450069636
+Audio buffer appended, time: 1.396057255
+Microphone buffer written, time: 1.444679577
+Audio buffer appended, time: 1.416048042
+Microphone buffer written, time: 1.464679577
+Audio buffer appended, time: 1.436059664
+Microphone buffer written, time: 1.484679577
+Audio buffer appended, time: 1.456065474
+Video buffer appended, time: 1.518114745
+Microphone buffer written, time: 1.504679577
+Audio buffer appended, time: 1.476056262
+Microphone buffer written, time: 1.524679577
+Video buffer appended, time: 1.549997306
+Audio buffer appended, time: 1.496067883
+Microphone buffer written, time: 1.544679577
+Video buffer appended, time: 1.572122076
+Audio buffer appended, time: 1.516058671
+Microphone buffer written, time: 1.564679577
+Microphone buffer written, time: 1.584679577
+Video buffer appended, time: 1.605767367
+Audio buffer appended, time: 1.53604946
+Microphone buffer written, time: 1.604679577
+Audio buffer appended, time: 1.55606108
+Audio buffer appended, time: 1.57606108
+Video buffer appended, time: 1.639087591
+Audio buffer appended, time: 1.596066892
+Microphone buffer written, time: 1.624679577
+Audio buffer appended, time: 1.616057679
+Microphone buffer written, time: 1.644679577
+Microphone buffer written, time: 1.664679577
+Audio buffer appended, time: 1.636048467
+Microphone buffer written, time: 1.684679577
+Video buffer appended, time: 1.705813496
+Audio buffer appended, time: 1.656060089
+Microphone buffer written, time: 1.704679577
+Audio buffer appended, time: 1.676050876
+Video buffer appended, time: 1.743002879
+Microphone buffer written, time: 1.724679577
+Audio buffer appended, time: 1.696062498
+Microphone buffer written, time: 1.744679577
+Video buffer appended, time: 1.776429358
+Audio buffer appended, time: 1.716053285
+Microphone buffer written, time: 1.764679577
+Audio buffer appended, time: 1.736059097
+Microphone buffer written, time: 1.784679577
+Video buffer appended, time: 1.809937389
+Audio buffer appended, time: 1.756049884
+Microphone buffer written, time: 1.804679577
+Audio buffer appended, time: 1.776061506
+Video buffer appended, time: 1.843136311
+Microphone buffer written, time: 1.824679577
+Audio buffer appended, time: 1.796052294
+Microphone buffer written, time: 1.844679577
+Microphone buffer written, time: 1.864679577
+Audio buffer appended, time: 1.816063915
+Microphone buffer written, time: 1.884679577
+Audio buffer appended, time: 1.836054703
+Video buffer appended, time: 1.910913191
+Audio buffer appended, time: 1.856060513
+Microphone buffer written, time: 1.904679577
+Audio buffer appended, time: 1.896051302
+Audio buffer appended, time: 1.876051302
+Microphone buffer written, time: 1.924679577
+Video buffer appended, time: 1.948282851
+Microphone buffer written, time: 1.944679577
+Audio buffer appended, time: 1.916062924
+Video buffer appended, time: 1.981765188
+Microphone buffer written, time: 1.964679577
+Audio buffer appended, time: 1.936053712
+Audio buffer appended, time: 1.956059523
+Microphone buffer written, time: 1.984679577
+Video buffer appended, time: 2.015042129
+Audio buffer appended, time: 1.976050311
+Microphone buffer written, time: 2.004679577
+Microphone buffer written, time: 2.024679577
+Audio buffer appended, time: 1.996061933
+Video buffer appended, time: 2.04829888
+Microphone buffer written, time: 2.044679577
+Audio buffer appended, time: 2.01605272
+Microphone buffer written, time: 2.064679577
+Audio buffer appended, time: 2.036064342
+Microphone buffer written, time: 2.084679577
+Video buffer appended, time: 2.11498636
+Audio buffer appended, time: 2.05605513
+Microphone buffer written, time: 2.104679577
+Audio buffer appended, time: 2.076066752
+Microphone buffer written, time: 2.124679577
+Video buffer appended, time: 2.148333106
+Audio buffer appended, time: 2.096051729
+Microphone buffer written, time: 2.144679577
+Video buffer appended, time: 2.169264359
+Audio buffer appended, time: 2.11606335
+Microphone buffer written, time: 2.164679577
+Audio buffer appended, time: 2.136054138
+Microphone buffer written, time: 2.184679577
+Video buffer appended, time: 2.219153814
+Audio buffer appended, time: 2.156065759
+Microphone buffer written, time: 2.204679577
+Audio buffer appended, time: 2.176056548
+Microphone buffer written, time: 2.224679577
+Video buffer appended, time: 2.252748199
+Microphone buffer written, time: 2.244679577
+Audio buffer appended, time: 2.196068168
+Audio buffer appended, time: 2.216053146
+Microphone buffer written, time: 2.264679577
+Audio buffer appended, time: 2.236064765
+Audio buffer appended, time: 2.256064765
+Video buffer appended, time: 2.303667362
+Microphone buffer written, time: 2.284679577
+Microphone buffer written, time: 2.304679577
+Audio buffer appended, time: 2.276055554
+Video buffer appended, time: 2.339478161
+Microphone buffer written, time: 2.324679577
+Audio buffer appended, time: 2.296067175
+Microphone buffer written, time: 2.344679577
+Video buffer appended, time: 2.371638098
+Audio buffer appended, time: 2.316057963
+Microphone buffer written, time: 2.364679577
+Audio buffer appended, time: 2.336048751
+Microphone buffer written, time: 2.384679577
+Video buffer appended, time: 2.405573676
+Audio buffer appended, time: 2.356054561
+Microphone buffer written, time: 2.404679577
+Audio buffer appended, time: 2.376066183
+Video buffer appended, time: 2.438127188
+Microphone buffer written, time: 2.424679577
+Audio buffer appended, time: 2.396056971
+Microphone buffer written, time: 2.444679577
+Audio buffer appended, time: 2.416068592
+Microphone buffer written, time: 2.464679577
+Audio buffer appended, time: 2.43605938
+Microphone buffer written, time: 2.484679577
+Video buffer appended, time: 2.505038832
+Audio buffer appended, time: 2.456050168
+Microphone buffer written, time: 2.504679577
+Audio buffer appended, time: 2.476055979
+Video buffer appended, time: 2.54244446
+Microphone buffer written, time: 2.524679577
+Audio buffer appended, time: 2.4960676
+Microphone buffer written, time: 2.544679577
+Video buffer appended, time: 2.57573925
+Audio buffer appended, time: 2.516058388
+Microphone buffer written, time: 2.564679577
+Audio buffer appended, time: 2.536049176
+Microphone buffer written, time: 2.584679577
+Video buffer appended, time: 2.609069264
+Microphone buffer written, time: 2.604679577
+Audio buffer appended, time: 2.556060797
+Audio buffer appended, time: 2.576060797
+Video buffer appended, time: 2.642828926
+Microphone buffer written, time: 2.624679577
+Audio buffer appended, time: 2.596051585
+Audio buffer appended, time: 2.616057396
+Microphone buffer written, time: 2.644679577
+Microphone buffer written, time: 2.664679577
+Audio buffer appended, time: 2.636048184
+Microphone buffer written, time: 2.684679577
+Audio buffer appended, time: 2.656059805
+Video buffer appended, time: 2.709312125
+Microphone buffer written, time: 2.704679577
+Audio buffer appended, time: 2.676050593
+Microphone buffer written, time: 2.724679577
+Video buffer appended, time: 2.746625508
+Audio buffer appended, time: 2.696062215
+Microphone buffer written, time: 2.744679577
+Audio buffer appended, time: 2.716053002
+Video buffer appended, time: 2.780192006
+Microphone buffer written, time: 2.764679577
+Audio buffer appended, time: 2.736058813
+Microphone buffer written, time: 2.784679577
+Audio buffer appended, time: 2.756049601
+Video buffer appended, time: 2.813681369
+Microphone buffer written, time: 2.804679577
+Audio buffer appended, time: 2.776061222
+Microphone buffer written, time: 2.824679577
+Video buffer appended, time: 2.847247801
+Audio buffer appended, time: 2.79605201
+Microphone buffer written, time: 2.844679577
+Audio buffer appended, time: 2.816063631
+Microphone buffer written, time: 2.864679577
+Microphone buffer written, time: 2.884679577
+Audio buffer appended, time: 2.83605442
+Video buffer appended, time: 2.914555982
+Microphone buffer written, time: 2.904679577
+Audio buffer appended, time: 2.85606604
+Audio buffer appended, time: 2.876051018
+Audio buffer appended, time: 2.896051018
+Microphone buffer written, time: 2.924679577
+Video buffer appended, time: 2.948775496
+Audio buffer appended, time: 2.916062641
+Microphone buffer written, time: 2.944679577
+Video buffer appended, time: 2.982424318
+Microphone buffer written, time: 2.964679577
+Audio buffer appended, time: 2.936053429
+Microphone buffer written, time: 2.984679577
+Audio buffer appended, time: 2.956065051
+Video buffer appended, time: 3.017373708
+Audio buffer appended, time: 2.976050028
+Microphone buffer written, time: 3.004679577
+Microphone buffer written, time: 3.024679577
+Audio buffer appended, time: 2.996061649
+Video buffer appended, time: 3.051624707
+Microphone buffer written, time: 3.044679577
+Audio buffer appended, time: 3.016052437
+Microphone buffer written, time: 3.064679577
+Audio buffer appended, time: 3.036064058
+Microphone buffer written, time: 3.084679577
+Audio buffer appended, time: 3.056054847
+Video buffer appended, time: 3.121101243
+Microphone buffer written, time: 3.104679577
+Audio buffer appended, time: 3.076066467
+Microphone buffer written, time: 3.124679577
+Audio buffer appended, time: 3.096051445
+Video buffer appended, time: 3.156091684
+Microphone buffer written, time: 3.144679577
+Audio buffer appended, time: 3.116063066
+Microphone buffer written, time: 3.164679577
+Video buffer appended, time: 3.190682444
+Audio buffer appended, time: 3.136053854
+Microphone buffer written, time: 3.184679577
+Audio buffer appended, time: 3.156065476
+Microphone buffer written, time: 3.204679577
+Video buffer appended, time: 3.225298267
+Audio buffer appended, time: 3.176056264
+Microphone buffer written, time: 3.224679577
+Video buffer appended, time: 3.258762595
+Microphone buffer written, time: 3.244679577
+Audio buffer appended, time: 3.196067885
+Microphone buffer written, time: 3.264679577
+Audio buffer appended, time: 3.216058671
+Audio buffer appended, time: 3.236064482
+Audio buffer appended, time: 3.256064482
+Microphone buffer written, time: 3.284679577
+Audio buffer appended, time: 3.27605527
+Microphone buffer written, time: 3.304679577
+Video buffer appended, time: 3.327746372
+Microphone buffer written, time: 3.324679577
+Video buffer appended, time: 3.346832218
+Audio buffer appended, time: 3.296066892
+Microphone buffer written, time: 3.344679577
+Audio buffer appended, time: 3.316057679
+Video buffer appended, time: 3.381564608
+Microphone buffer written, time: 3.364679577
+Audio buffer appended, time: 3.336048468
+Microphone buffer written, time: 3.384679577
+Video buffer appended, time: 3.416669181
+Audio buffer appended, time: 3.356060089
+Microphone buffer written, time: 3.404679577
+Audio buffer appended, time: 3.3760659
+Microphone buffer written, time: 3.424679577
+Audio buffer appended, time: 3.396056687
+Video buffer appended, time: 3.452357111
+Microphone buffer written, time: 3.444679577
+Audio buffer appended, time: 3.416068309
+Microphone buffer written, time: 3.464679577
+Audio buffer appended, time: 3.436059097
+Microphone buffer written, time: 3.484679577
+Audio buffer appended, time: 3.456049884
+Video buffer appended, time: 3.522290521
+Microphone buffer written, time: 3.504679577
+Microphone buffer written, time: 3.524679577
+Audio buffer appended, time: 3.476061506
+Video buffer appended, time: 3.555912996
+Audio buffer appended, time: 3.496067316
+Microphone buffer written, time: 3.544679577
+Audio buffer appended, time: 3.516058105
+Microphone buffer written, time: 3.564679577
+Video buffer appended, time: 3.590394155
+Audio buffer appended, time: 3.536048893
+Microphone buffer written, time: 3.584679577
+Video buffer appended, time: 3.623796255
+Microphone buffer written, time: 3.604679577
+Audio buffer appended, time: 3.556060514
+Audio buffer appended, time: 3.576060514
+Microphone buffer written, time: 3.624679577
+Audio buffer appended, time: 3.596051302
+Video buffer appended, time: 3.658973328
+Microphone buffer written, time: 3.644679577
+Audio buffer appended, time: 3.616062923
+Audio buffer appended, time: 3.636047901
+Microphone buffer written, time: 3.664679577
+Microphone buffer written, time: 3.684679577
+Audio buffer appended, time: 3.656059521
+Microphone buffer written, time: 3.704679577
+Video buffer appended, time: 3.728575851
+Audio buffer appended, time: 3.67605031
+Microphone buffer written, time: 3.724679577
+Video buffer appended, time: 3.746774764
+Audio buffer appended, time: 3.696061931
+Microphone buffer written, time: 3.744679577
+Audio buffer appended, time: 3.716052719
+Video buffer appended, time: 3.780009306
+Microphone buffer written, time: 3.764679577
+Audio buffer appended, time: 3.73606434
+Microphone buffer written, time: 3.784679577
+Audio buffer appended, time: 3.756049317
+Video buffer appended, time: 3.813389345
+Microphone buffer written, time: 3.804679577
+Audio buffer appended, time: 3.776060939
+Microphone buffer written, time: 3.824679577
+Video buffer appended, time: 3.846734411
+Audio buffer appended, time: 3.796051726
+Microphone buffer written, time: 3.844679577
+Audio buffer appended, time: 3.816063348
+Microphone buffer written, time: 3.864679577
+Microphone buffer written, time: 3.884679577
+Audio buffer appended, time: 3.836054136
+Video buffer appended, time: 3.914086825
+Microphone buffer written, time: 3.904679577
+Audio buffer appended, time: 3.856065757
+Audio buffer appended, time: 3.876050735
+Audio buffer appended, time: 3.896050735
+Microphone buffer written, time: 3.924679577
+Video buffer appended, time: 3.951432746
+Audio buffer appended, time: 3.916062358
+Microphone buffer written, time: 3.944679577
+Microphone buffer written, time: 3.964679577
+Video buffer appended, time: 3.985044656
+Audio buffer appended, time: 3.936053146
+Microphone buffer written, time: 3.984679577
+Audio buffer appended, time: 3.956064767
+Video buffer appended, time: 4.019085965
+Microphone buffer written, time: 4.004679577
+Audio buffer appended, time: 3.976055555
+Audio buffer appended, time: 3.996061366
+Microphone buffer written, time: 4.024679577
+Video buffer appended, time: 4.051722553
+Microphone buffer written, time: 4.044679577
+Audio buffer appended, time: 4.016052153
+Microphone buffer written, time: 4.064679577
+Audio buffer appended, time: 4.036063775
+Microphone buffer written, time: 4.084679577
+Audio buffer appended, time: 4.056054563
+Video buffer appended, time: 4.118745154
+Microphone buffer written, time: 4.104679577
+Audio buffer appended, time: 4.076066184
+Microphone buffer written, time: 4.124679577
+Video buffer appended, time: 4.151789394
+Audio buffer appended, time: 4.096056972
+Microphone buffer written, time: 4.144679577
+Audio buffer appended, time: 4.116062783
+Video buffer appended, time: 4.172986124
+Microphone buffer written, time: 4.164679577
+Audio buffer appended, time: 4.136053571
+Microphone buffer written, time: 4.184679577
+Video buffer appended, time: 4.206875414
+Audio buffer appended, time: 4.156065193
+Microphone buffer written, time: 4.204679577
+Video buffer appended, time: 4.23936442
+Audio buffer appended, time: 4.17605598
+Microphone buffer written, time: 4.224679577
+Microphone buffer written, time: 4.244679577
+Audio buffer appended, time: 4.196067602
+Microphone buffer written, time: 4.264679577
+Audio buffer appended, time: 4.21605839
+Audio buffer appended, time: 4.236064198
+Audio buffer appended, time: 4.256064198
+Microphone buffer written, time: 4.284679577
+Video buffer appended, time: 4.306296632
+Audio buffer appended, time: 4.276054987
+Microphone buffer written, time: 4.304679577
+Video buffer appended, time: 4.340204911
+Microphone buffer written, time: 4.324679577
+Audio buffer appended, time: 4.296066609
+Microphone buffer written, time: 4.344679577
+Audio buffer appended, time: 4.316057396
+Video buffer appended, time: 4.377063472
+Microphone buffer written, time: 4.364679577
+Audio buffer appended, time: 4.336048184
+Microphone buffer written, time: 4.384679577
+Video buffer appended, time: 4.410160857
+Audio buffer appended, time: 4.356059805
+Microphone buffer written, time: 4.404679577
+Audio buffer appended, time: 4.376050593
+Video buffer appended, time: 4.443896347
+Microphone buffer written, time: 4.424679577
+Audio buffer appended, time: 4.396056404
+Microphone buffer written, time: 4.444679577
+Audio buffer appended, time: 4.416068025
+Microphone buffer written, time: 4.464679577
+Audio buffer appended, time: 4.436058814
+Microphone buffer written, time: 4.484679577
+Video buffer appended, time: 4.510309102
+Audio buffer appended, time: 4.456049601
+Microphone buffer written, time: 4.504679577
+Audio buffer appended, time: 4.476061223
+Microphone buffer written, time: 4.524679577
+Video buffer appended, time: 4.548182136
+Microphone buffer written, time: 4.544679577
+Audio buffer appended, time: 4.49605201
+Audio buffer appended, time: 4.516057821
+Video buffer appended, time: 4.581270929
+Microphone buffer written, time: 4.564679577
+Audio buffer appended, time: 4.536048609
+Microphone buffer written, time: 4.584679577
+Video buffer appended, time: 4.614665307
+Audio buffer appended, time: 4.55606023
+Audio buffer appended, time: 4.57606023
+Microphone buffer written, time: 4.604679577
+Microphone buffer written, time: 4.624679577
+Audio buffer appended, time: 4.596051019
+Video buffer appended, time: 4.648013868
+Microphone buffer written, time: 4.644679577
+Audio buffer appended, time: 4.616062639
+Microphone buffer written, time: 4.664679577
+Audio buffer appended, time: 4.636053428
+Microphone buffer written, time: 4.684679577
+Audio buffer appended, time: 4.656059238
+Video buffer appended, time: 4.715977023
+Microphone buffer written, time: 4.704679577
+Audio buffer appended, time: 4.676050026
+Microphone buffer written, time: 4.724679577
+Video buffer appended, time: 4.747674062
+Audio buffer appended, time: 4.696061647
+Microphone buffer written, time: 4.744679577
+Video buffer appended, time: 4.77065101
+Audio buffer appended, time: 4.716052435
+Microphone buffer written, time: 4.764679577
+Audio buffer appended, time: 4.736064057
+Video buffer appended, time: 4.80346607
+Microphone buffer written, time: 4.784679577
+Audio buffer appended, time: 4.756054844
+Microphone buffer written, time: 4.804679577
+Audio buffer appended, time: 4.776060656
+Video buffer appended, time: 4.837570756
+Microphone buffer written, time: 4.824679577
+Audio buffer appended, time: 4.796051443
+Microphone buffer written, time: 4.844679577
+Audio buffer appended, time: 4.816063065
+Microphone buffer written, time: 4.864679577
+Audio buffer appended, time: 4.836053853
+Video buffer appended, time: 4.904337031
+Microphone buffer written, time: 4.884679577
+Microphone buffer written, time: 4.904679577
+Audio buffer appended, time: 4.856065474
+Video buffer appended, time: 4.942262274
+Microphone buffer written, time: 4.924679577
+Audio buffer appended, time: 4.876056262
+Audio buffer appended, time: 4.896056262
+Audio buffer appended, time: 4.916062074
+Microphone buffer written, time: 4.944679577
+Video buffer appended, time: 4.975007358
+Audio buffer appended, time: 4.936052862
+Microphone buffer written, time: 4.964679577
+Microphone buffer written, time: 4.984679577
+Audio buffer appended, time: 4.956064483
+Video buffer appended, time: 5.008946581
+Microphone buffer written, time: 5.004679577
+Audio buffer appended, time: 4.976055271
+Video buffer appended, time: 5.042225078
+Microphone buffer written, time: 5.024679577
+Audio buffer appended, time: 4.996066893
+Microphone buffer written, time: 5.044679577
+Audio buffer appended, time: 5.01605187
+Microphone buffer written, time: 5.064679577
+Audio buffer appended, time: 5.036063492
+Microphone buffer written, time: 5.084679577
+Video buffer appended, time: 5.108541944
+Audio buffer appended, time: 5.05605428
+Microphone buffer written, time: 5.104679577
+Audio buffer appended, time: 5.076065901
+Microphone buffer written, time: 5.124679577
+Video buffer appended, time: 5.146360811
+Audio buffer appended, time: 5.096056689
+Microphone buffer written, time: 5.144679577
+Video buffer appended, time: 5.179278991
+Audio buffer appended, time: 5.116068311
+Microphone buffer written, time: 5.164679577
+Audio buffer appended, time: 5.136053288
+Microphone buffer written, time: 5.184679577
+Video buffer appended, time: 5.212551196
+Audio buffer appended, time: 5.156064909
+Microphone buffer written, time: 5.204679577
+Audio buffer appended, time: 5.176055697
+Microphone buffer written, time: 5.224679577
+Video buffer appended, time: 5.24599066
+Audio buffer appended, time: 5.196067318
+Microphone buffer written, time: 5.244679577
+Microphone buffer written, time: 5.264679577
+Audio buffer appended, time: 5.216058107
+Microphone buffer written, time: 5.284679577
+Audio buffer appended, time: 5.236048892
+Audio buffer appended, time: 5.256048892
+Video buffer appended, time: 5.312941103
+Audio buffer appended, time: 5.276054704
+Microphone buffer written, time: 5.304679577
+Audio buffer appended, time: 5.296066324
+Microphone buffer written, time: 5.324679577
+Microphone buffer written, time: 5.344679577
+Video buffer appended, time: 5.364416833
+Audio buffer appended, time: 5.316057113
+Video buffer appended, time: 5.384154944
+Microphone buffer written, time: 5.364679577
+Audio buffer appended, time: 5.336047901
+Microphone buffer written, time: 5.384679577
+Audio buffer appended, time: 5.356059522
+Video buffer appended, time: 5.417291011
+Microphone buffer written, time: 5.404679577
+Audio buffer appended, time: 5.37605031
+Microphone buffer written, time: 5.424679577
+Audio buffer appended, time: 5.39605612
+Video buffer appended, time: 5.450381146
+Microphone buffer written, time: 5.444679577
+Audio buffer appended, time: 5.416067742
+Microphone buffer written, time: 5.464679577
+Audio buffer appended, time: 5.436058529
+Microphone buffer written, time: 5.484679577
+Video buffer appended, time: 5.517814027
+Audio buffer appended, time: 5.456049318
+Microphone buffer written, time: 5.504679577
+Audio buffer appended, time: 5.476060939
+Microphone buffer written, time: 5.524679577
+Video buffer appended, time: 5.550789236
+Microphone buffer written, time: 5.544679577
+Audio buffer appended, time: 5.496051727
+Video buffer appended, time: 5.571629686
+Audio buffer appended, time: 5.516057538
+Microphone buffer written, time: 5.564679577
+Audio buffer appended, time: 5.536048325
+Microphone buffer written, time: 5.584679577
+Video buffer appended, time: 5.604759474
+Audio buffer appended, time: 5.556059947
+Audio buffer appended, time: 5.576059947
+Microphone buffer written, time: 5.604679577
+Video buffer appended, time: 5.638079229
+Microphone buffer written, time: 5.624679577
+Audio buffer appended, time: 5.596050735
+Microphone buffer written, time: 5.644679577
+Audio buffer appended, time: 5.616062356
+Microphone buffer written, time: 5.664679577
+Audio buffer appended, time: 5.636053144
+Microphone buffer written, time: 5.684679577
+Video buffer appended, time: 5.704998463
+Audio buffer appended, time: 5.656064765
+Microphone buffer written, time: 5.704679577
+Audio buffer appended, time: 5.676049743
+Video buffer appended, time: 5.742389458
+Microphone buffer written, time: 5.724679577
+Audio buffer appended, time: 5.696061364
+Microphone buffer written, time: 5.744679577
+Audio buffer appended, time: 5.716052152
+Video buffer appended, time: 5.775753429
+Microphone buffer written, time: 5.764679577
+Audio buffer appended, time: 5.736063774
+Microphone buffer written, time: 5.784679577
+Video buffer appended, time: 5.808895329
+Audio buffer appended, time: 5.756054561
+Microphone buffer written, time: 5.804679577
+Video buffer appended, time: 5.842554028
+Audio buffer appended, time: 5.776066183
+Microphone buffer written, time: 5.824679577
+Audio buffer appended, time: 5.79605116
+Microphone buffer written, time: 5.844679577
+Audio buffer appended, time: 5.816062781
+Microphone buffer written, time: 5.864679577
+Audio buffer appended, time: 5.836053569
+Microphone buffer written, time: 5.884679577
+Video buffer appended, time: 5.909206538
+Microphone buffer written, time: 5.904679577
+Audio buffer appended, time: 5.85606519
+Microphone buffer written, time: 5.924679577
+Video buffer appended, time: 5.946967226
+Audio buffer appended, time: 5.876055979
+Audio buffer appended, time: 5.896055979
+Microphone buffer written, time: 5.944679577
+Audio buffer appended, time: 5.916067601
+Video buffer appended, time: 5.980190884
+Audio buffer appended, time: 5.936052579
+Microphone buffer written, time: 5.964679577
+Microphone buffer written, time: 5.984679577
+Audio buffer appended, time: 5.9560642
+Video buffer appended, time: 6.013310682
+Microphone buffer written, time: 6.004679577
+Audio buffer appended, time: 5.976054988
+Microphone buffer written, time: 6.024679577
+Video buffer appended, time: 6.046596569
+Audio buffer appended, time: 5.99606661
+Microphone buffer written, time: 6.044679577
+Audio buffer appended, time: 6.016057397
+Microphone buffer written, time: 6.064679577
+Audio buffer appended, time: 6.036063208
+Microphone buffer written, time: 6.084679577
+Audio buffer appended, time: 6.056053996
+Video buffer appended, time: 6.113630688
+Microphone buffer written, time: 6.104679577
+Audio buffer appended, time: 6.076065617
+Microphone buffer written, time: 6.124679577
+Video buffer appended, time: 6.151078683
+Audio buffer appended, time: 6.096056406
+Microphone buffer written, time: 6.144679577
+Audio buffer appended, time: 6.116068026
+Video buffer appended, time: 6.184373909
+Microphone buffer written, time: 6.164679577
+Audio buffer appended, time: 6.136058815
+Microphone buffer written, time: 6.184679577
+Audio buffer appended, time: 6.156064626
+Video buffer appended, time: 6.217799455
+Microphone buffer written, time: 6.204679577
+Audio buffer appended, time: 6.176055413
+Microphone buffer written, time: 6.224679577
+Video buffer appended, time: 6.250978692
+Audio buffer appended, time: 6.196067035
+Microphone buffer written, time: 6.244679577
+Microphone buffer written, time: 6.264679577
+Audio buffer appended, time: 6.216057823
+Microphone buffer written, time: 6.284679577
+Audio buffer appended, time: 6.236048609
+Video buffer appended, time: 6.317698525
+Microphone buffer written, time: 6.304679577
+Audio buffer appended, time: 6.276060231
+Audio buffer appended, time: 6.296066041
+Microphone buffer written, time: 6.324679577
+Video buffer appended, time: 6.352157505
+Microphone buffer written, time: 6.344679577
+Audio buffer appended, time: 6.316056829
+Video buffer appended, time: 6.371907265
+Microphone buffer written, time: 6.364679577
+Audio buffer appended, time: 6.336068451
+Microphone buffer written, time: 6.384679577
+Video buffer appended, time: 6.405144272
+Audio buffer appended, time: 6.356059238
+Microphone buffer written, time: 6.404679577
+Audio buffer appended, time: 6.376050027
+Video buffer appended, time: 6.438479062
+Microphone buffer written, time: 6.424679577
+Audio buffer appended, time: 6.396061647
+Microphone buffer written, time: 6.444679577
+Audio buffer appended, time: 6.416067459
+Microphone buffer written, time: 6.464679577
+Audio buffer appended, time: 6.436058246
+Microphone buffer written, time: 6.484679577
+Video buffer appended, time: 6.505400597
+Audio buffer appended, time: 6.456049034
+Microphone buffer written, time: 6.504679577
+Audio buffer appended, time: 6.476060656
+Video buffer appended, time: 6.542757495
+Microphone buffer written, time: 6.524679577
+Audio buffer appended, time: 6.496051443
+Microphone buffer written, time: 6.544679577
+Video buffer appended, time: 6.576657484
+Microphone buffer written, time: 6.564679577
+Audio buffer appended, time: 6.516063065
+Audio buffer appended, time: 6.536048042
+Microphone buffer written, time: 6.584679577
+Video buffer appended, time: 6.609429649
+Audio buffer appended, time: 6.556059664
+Audio buffer appended, time: 6.576059664
+Microphone buffer written, time: 6.604679577
+Video buffer appended, time: 6.644121137
+Microphone buffer written, time: 6.624679577
+Audio buffer appended, time: 6.596050451
+Microphone buffer written, time: 6.644679577
+Audio buffer appended, time: 6.616062073
+Microphone buffer written, time: 6.664679577
+Audio buffer appended, time: 6.636052861
+Microphone buffer written, time: 6.684679577
+Video buffer appended, time: 6.709799383
+Audio buffer appended, time: 6.656064482
+Microphone buffer written, time: 6.704679577
+Audio buffer appended, time: 6.67604946
+Video buffer appended, time: 6.743885383
+Microphone buffer written, time: 6.724679577
+Audio buffer appended, time: 6.69606108
+Microphone buffer written, time: 6.744679577
+Audio buffer appended, time: 6.716051869
+Video buffer appended, time: 6.778336965
+Microphone buffer written, time: 6.764679577
+Audio buffer appended, time: 6.736063489
+Microphone buffer written, time: 6.784679577
+Video buffer appended, time: 6.812751863
+Audio buffer appended, time: 6.756054278
+Microphone buffer written, time: 6.804679577
+Audio buffer appended, time: 6.776065899
+Microphone buffer written, time: 6.824679577
+Video buffer appended, time: 6.847305846
+Microphone buffer written, time: 6.844679577
+Audio buffer appended, time: 6.796056687
+Audio buffer appended, time: 6.816062498
+Microphone buffer written, time: 6.864679577
+Audio buffer appended, time: 6.836053285
+Microphone buffer written, time: 6.884679577
+Video buffer appended, time: 6.916849637
+Audio buffer appended, time: 6.856064907
+Microphone buffer written, time: 6.904679577
+Microphone buffer written, time: 6.924679577
+Audio buffer appended, time: 6.876055695
+Audio buffer appended, time: 6.896055695
+Video buffer appended, time: 6.951029702
+Microphone buffer written, time: 6.944679577
+Audio buffer appended, time: 6.916067318
+Microphone buffer written, time: 6.964679577
+Video buffer appended, time: 6.98559674
+Audio buffer appended, time: 6.936058106
+Microphone buffer written, time: 6.984679577
+Audio buffer appended, time: 6.956063916
+Video buffer appended, time: 7.019825929
+Microphone buffer written, time: 7.004679577
+Audio buffer appended, time: 6.976054705
+Microphone buffer written, time: 7.024679577
+Audio buffer appended, time: 6.996066326
+Video buffer appended, time: 7.054113576
+Microphone buffer written, time: 7.044679577
+Audio buffer appended, time: 7.016057114
+Microphone buffer written, time: 7.064679577
+Audio buffer appended, time: 7.036047902
+Microphone buffer written, time: 7.084679577
+Audio buffer appended, time: 7.056053712
+Video buffer appended, time: 7.122788264
+Microphone buffer written, time: 7.104679577
+Audio buffer appended, time: 7.076065334
+Microphone buffer written, time: 7.124679577
+Audio buffer appended, time: 7.096056122
+Video buffer appended, time: 7.158223917
+Microphone buffer written, time: 7.144679577
+Audio buffer appended, time: 7.116067743
+Microphone buffer written, time: 7.164679577
+Video buffer appended, time: 7.191137278
+Audio buffer appended, time: 7.136058531
+Microphone buffer written, time: 7.184679577
+Video buffer appended, time: 7.210799474
+Microphone buffer written, time: 7.204679577
+Audio buffer appended, time: 7.15604932
+Audio buffer appended, time: 7.17605513
+Microphone buffer written, time: 7.224679577
+Video buffer appended, time: 7.24560429
+Audio buffer appended, time: 7.196066752
+Microphone buffer written, time: 7.244679577
+Audio buffer appended, time: 7.216057539
+Microphone buffer written, time: 7.264679577
+Microphone buffer written, time: 7.284679577
+Audio buffer appended, time: 7.236048326
+Audio buffer appended, time: 7.256048326
+Video buffer appended, time: 7.314416202
+Microphone buffer written, time: 7.304679577
+Audio buffer appended, time: 7.276059947
+Microphone buffer written, time: 7.324679577
+Video buffer appended, time: 7.349546735
+Audio buffer appended, time: 7.296050735
+Audio buffer appended, time: 7.316056546
+Microphone buffer written, time: 7.344679577
+Video buffer appended, time: 7.377440905
+Microphone buffer written, time: 7.364679577
+Audio buffer appended, time: 7.336068167
+Microphone buffer written, time: 7.384679577
+Audio buffer appended, time: 7.356058955
+Video buffer appended, time: 7.411052361
+Microphone buffer written, time: 7.404679577
+Audio buffer appended, time: 7.376049743
+Microphone buffer written, time: 7.424679577
+Video buffer appended, time: 7.445519587
+Audio buffer appended, time: 7.396061364
+Microphone buffer written, time: 7.444679577
+Audio buffer appended, time: 7.416052152
+Microphone buffer written, time: 7.464679577
+Audio buffer appended, time: 7.436057963
+Microphone buffer written, time: 7.484679577
+Video buffer appended, time: 7.510655251
+Audio buffer appended, time: 7.456048751
+Microphone buffer written, time: 7.504679577
+Audio buffer appended, time: 7.476060372
+Microphone buffer written, time: 7.524679577
+Video buffer appended, time: 7.545286368
+Audio buffer appended, time: 7.49605116
+Microphone buffer written, time: 7.544679577
+Video buffer appended, time: 7.579862784
+Microphone buffer written, time: 7.564679577
+Audio buffer appended, time: 7.516062782
+Microphone buffer written, time: 7.584679577
+Audio buffer appended, time: 7.536053569
+Video buffer appended, time: 7.613732111
+Audio buffer appended, time: 7.55605938
+Audio buffer appended, time: 7.57605938
+Microphone buffer written, time: 7.604679577
+Audio buffer appended, time: 7.596050168
+Microphone buffer written, time: 7.624679577
+Video buffer appended, time: 7.645225019
+Microphone buffer written, time: 7.644679577
+Audio buffer appended, time: 7.616061789
+Microphone buffer written, time: 7.664679577
+Audio buffer appended, time: 7.636052578
+Microphone buffer written, time: 7.684679577
+Video buffer appended, time: 7.712132159
+Audio buffer appended, time: 7.656064198
+Microphone buffer written, time: 7.704679577
+Audio buffer appended, time: 7.676054987
+Microphone buffer written, time: 7.724679577
+Audio buffer appended, time: 7.696060797
+Video buffer appended, time: 7.749661286
+Microphone buffer written, time: 7.744679577
+Audio buffer appended, time: 7.716051585
+Video buffer appended, time: 7.783225465
+Microphone buffer written, time: 7.764679577
+Audio buffer appended, time: 7.736063206
+Microphone buffer written, time: 7.784679577
+Video buffer appended, time: 7.816388841
+Audio buffer appended, time: 7.756053994
+Microphone buffer written, time: 7.804679577
+Audio buffer appended, time: 7.776065616
+Microphone buffer written, time: 7.824679577
+Video buffer appended, time: 7.849775722
+Audio buffer appended, time: 7.796056403
+Microphone buffer written, time: 7.844679577
+Audio buffer appended, time: 7.816062215
+Microphone buffer written, time: 7.864679577
+Audio buffer appended, time: 7.836053002
+Microphone buffer written, time: 7.884679577
+Video buffer appended, time: 7.916618761
+Audio buffer appended, time: 7.856064624
+Microphone buffer written, time: 7.904679577
+Microphone buffer written, time: 7.924679577
+Audio buffer appended, time: 7.876055411
+Audio buffer appended, time: 7.896055411
+Video buffer appended, time: 7.949646909
+Microphone buffer written, time: 7.944679577
+Audio buffer appended, time: 7.916067034
+Video buffer appended, time: 7.971956849
+Microphone buffer written, time: 7.964679577
+Audio buffer appended, time: 7.936057823
+Audio buffer appended, time: 7.956063633
+Video buffer appended, time: 8.003922963
+Microphone buffer written, time: 7.984679577
+Microphone buffer written, time: 8.004679577
+Audio buffer appended, time: 7.976054421
+Video buffer appended, time: 8.037187626
+Microphone buffer written, time: 8.024679577
+Audio buffer appended, time: 7.996066042
+Microphone buffer written, time: 8.044679577
+Audio buffer appended, time: 8.01605683
+Microphone buffer written, time: 8.064679577
+Audio buffer appended, time: 8.036068452
+Video buffer appended, time: 8.104132088
+Microphone buffer written, time: 8.084679577
+Audio buffer appended, time: 8.056053429
+Microphone buffer written, time: 8.104679577
+Audio buffer appended, time: 8.076065051
+Video buffer appended, time: 8.141693552
+Microphone buffer written, time: 8.124679577
+Audio buffer appended, time: 8.096055839
+Microphone buffer written, time: 8.144679577
+Video buffer appended, time: 8.174898418
+Audio buffer appended, time: 8.11606746
+Microphone buffer written, time: 8.164679577
+Audio buffer appended, time: 8.136058248
+Microphone buffer written, time: 8.184679577
+Video buffer appended, time: 8.208214363
+Audio buffer appended, time: 8.156049036
+Microphone buffer written, time: 8.204679577
+Audio buffer appended, time: 8.176054847
+Video buffer appended, time: 8.242056465
+Microphone buffer written, time: 8.224679577
+Audio buffer appended, time: 8.196066468
+Microphone buffer written, time: 8.244679577
+Audio buffer appended, time: 8.216057256
+Microphone buffer written, time: 8.264679577
+Microphone buffer written, time: 8.284679577
+Audio buffer appended, time: 8.236048042
+Audio buffer appended, time: 8.256048042
+Video buffer appended, time: 8.308963124
+Microphone buffer written, time: 8.304679577
+Audio buffer appended, time: 8.276059664
+Microphone buffer written, time: 8.324679577
+Audio buffer appended, time: 8.296050451
+Video buffer appended, time: 8.361357913
+Microphone buffer written, time: 8.344679577
+Audio buffer appended, time: 8.316062073
+Video buffer appended, time: 8.379878889
+Microphone buffer written, time: 8.364679577
+Audio buffer appended, time: 8.336067883
+Microphone buffer written, time: 8.384679577
+Audio buffer appended, time: 8.356058672
+Video buffer appended, time: 8.413661863
+Microphone buffer written, time: 8.404679577
+Audio buffer appended, time: 8.37604946
+Microphone buffer written, time: 8.424679577
+Video buffer appended, time: 8.446398187
+Audio buffer appended, time: 8.396061081
+Microphone buffer written, time: 8.444679577
+Audio buffer appended, time: 8.416051869
+Microphone buffer written, time: 8.464679577
+Audio buffer appended, time: 8.43606349
+Microphone buffer written, time: 8.484679577
+Video buffer appended, time: 8.513313635
+Audio buffer appended, time: 8.456048468
+Microphone buffer written, time: 8.504679577
+Audio buffer appended, time: 8.476060088
+Microphone buffer written, time: 8.524679577
+Video buffer appended, time: 8.550626942
+Audio buffer appended, time: 8.496050877
+Microphone buffer written, time: 8.544679577
+Audio buffer appended, time: 8.516062498
+Microphone buffer written, time: 8.564679577
+Video buffer appended, time: 8.584597224
+Microphone buffer written, time: 8.584679577
+Audio buffer appended, time: 8.536053286
+Video buffer appended, time: 8.617354027
+Microphone buffer written, time: 8.604679577
+Audio buffer appended, time: 8.556064907
+Audio buffer appended, time: 8.576064907
+Audio buffer appended, time: 8.596049884
+Microphone buffer written, time: 8.624679577
+Video buffer appended, time: 8.650714432
+Microphone buffer written, time: 8.644679577
+Audio buffer appended, time: 8.616061506
+Microphone buffer written, time: 8.664679577
+Audio buffer appended, time: 8.636052293
+Microphone buffer written, time: 8.684679577
+Audio buffer appended, time: 8.656063915
+Video buffer appended, time: 8.717462015
+Microphone buffer written, time: 8.704679577
+Audio buffer appended, time: 8.676054703
+Microphone buffer written, time: 8.724679577
+Video buffer appended, time: 8.751131231
+Audio buffer appended, time: 8.696066324
+Microphone buffer written, time: 8.744679577
+Audio buffer appended, time: 8.716051302
+Video buffer appended, time: 8.771422447
+Microphone buffer written, time: 8.764679577
+Audio buffer appended, time: 8.736062923
+Microphone buffer written, time: 8.784679577
+Video buffer appended, time: 8.805346948
+Audio buffer appended, time: 8.756053711
+Microphone buffer written, time: 8.804679577
+Video buffer appended, time: 8.838425119
+Audio buffer appended, time: 8.776065333
+Microphone buffer written, time: 8.824679577
+Audio buffer appended, time: 8.79605612
+Microphone buffer written, time: 8.844679577
+Microphone buffer written, time: 8.864679577
+Audio buffer appended, time: 8.816067742
+Audio buffer appended, time: 8.836052719
+Microphone buffer written, time: 8.884679577
+Video buffer appended, time: 8.905205189
+Audio buffer appended, time: 8.85606434
+Microphone buffer written, time: 8.904679577
+Audio buffer appended, time: 8.876055128
+Audio buffer appended, time: 8.896055128
+Video buffer appended, time: 8.94320134
+Microphone buffer written, time: 8.924679577
+Microphone buffer written, time: 8.944679577
+Audio buffer appended, time: 8.916066751
+Video buffer appended, time: 8.976106016
+Microphone buffer written, time: 8.964679577
+Audio buffer appended, time: 8.936057539
+Audio buffer appended, time: 8.95606335
+Microphone buffer written, time: 8.984679577
+Video buffer appended, time: 9.009102857
+Microphone buffer written, time: 9.004679577
+Audio buffer appended, time: 8.976054138
+Video buffer appended, time: 9.043041727
+Microphone buffer written, time: 9.024679577
+Audio buffer appended, time: 8.996065759
+Microphone buffer written, time: 9.044679577
+Audio buffer appended, time: 9.016056547
+Microphone buffer written, time: 9.064679577
+Audio buffer appended, time: 9.036068169
+Microphone buffer written, time: 9.084679577
+Video buffer appended, time: 9.109876211
+Audio buffer appended, time: 9.056058956
+Microphone buffer written, time: 9.104679577
+Audio buffer appended, time: 9.076064767
+Microphone buffer written, time: 9.124679577
+Video buffer appended, time: 9.147243817
+Audio buffer appended, time: 9.096055555
+Microphone buffer written, time: 9.144679577
+Audio buffer appended, time: 9.116067176
+Video buffer appended, time: 9.180222856
+Microphone buffer written, time: 9.164679577
+Audio buffer appended, time: 9.136057965
+Microphone buffer written, time: 9.184679577
+Video buffer appended, time: 9.213367975
+Audio buffer appended, time: 9.156048753
+Microphone buffer written, time: 9.204679577
+Microphone buffer written, time: 9.224679577
+Audio buffer appended, time: 9.176060374
+Video buffer appended, time: 9.246876201
+Audio buffer appended, time: 9.196066185
+Microphone buffer written, time: 9.244679577
+Audio buffer appended, time: 9.216056972
+Microphone buffer written, time: 9.264679577
+Audio buffer appended, time: 9.236068592
+Audio buffer appended, time: 9.256068592
+Microphone buffer written, time: 9.284679577
+Video buffer appended, time: 9.313757902
+Microphone buffer written, time: 9.304679577
+Audio buffer appended, time: 9.276059381
+Microphone buffer written, time: 9.324679577
+Audio buffer appended, time: 9.296050168
+Microphone buffer written, time: 9.344679577
+Video buffer appended, time: 9.366659874
+Audio buffer appended, time: 9.31606179
+Video buffer appended, time: 9.384378909
+Microphone buffer written, time: 9.364679577
+Audio buffer appended, time: 9.3360676
+Microphone buffer written, time: 9.384679577
+Audio buffer appended, time: 9.356058388
+Video buffer appended, time: 9.418885514
+Microphone buffer written, time: 9.404679577
+Audio buffer appended, time: 9.376049176
+Microphone buffer written, time: 9.424679577
+Video buffer appended, time: 9.451323118
+Audio buffer appended, time: 9.396060797
+[02:40:02] Main: Handling stop-capture-with-completion
+stopCaptureWithCompletion called
+Microphone buffer written, time: 9.444679577
+AVCaptureSession state before stop: true
+Capture stopped
+Session ended at time: 9.451323118 seconds
+Writing completed. File saved at /Users/sg12/Movies/ScreenCapture.mp4
+Merging completed. File saved at /Users/sg12/Movies/MergedCapture.mp4
+Video file size: 3319310 bytes
+Audio file size: 586496 bytes
+Merged file size: 1607407 bytes
+[02:40:07] Main: Stop capture completed (forced by timeout, assuming success)

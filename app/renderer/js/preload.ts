@@ -3,10 +3,21 @@ import electron_bridge, { bridgeEvents } from "./electron-bridge.js";
 import * as NetworkError from "./pages/network.js";
 import { ipcRenderer } from "./typed-ipc-renderer.js";
 import { WalkieTalkieStatus } from "../../common/typed-ipc.js";
+import path from "node:path";
+import { app } from "@electron/remote";
 
 ipcRenderer.send("preload-log", "✅ Preload: Начало выполнения");
 ipcRenderer.send("preload-log", `✅ Preload: Загружен для URL: ${window.location.href}`);
 ipcRenderer.send("preload-log", `✅ Preload: ipcRenderer.send: ${typeof ipcRenderer.send}, ipcRenderer.invoke: ${typeof ipcRenderer.invoke}`);
+
+// Expose native addon methods via IPC (async)
+ipcRenderer.send("preload-log", "✅ Preload: Starting exposure of nativeScreenCapture");
+contextBridge.exposeInMainWorld("nativeScreenCapture", {
+  selectSourceWithPicker: () => ipcRenderer.invoke('select-source-with-picker'),
+  startCaptureWithCompletion: () => ipcRenderer.invoke('start-capture'),
+  stopCaptureWithCompletion: () => ipcRenderer.invoke('stop-capture')
+});
+ipcRenderer.send("preload-log", "✅ Preload: nativeScreenCapture exposed");
 
 // Регистрация обработчика toggle-walkie-talkie
 ipcRenderer.send("preload-log", "✅ Preload: Регистрация обработчика toggle-walkie-talkie");
@@ -98,3 +109,5 @@ window.addEventListener("load", () => {
     const $settingsButton = document.querySelector("#settings")!;
     NetworkError.init($reconnectButton, $settingsButton);
 });
+
+ipcRenderer.send("preload-log", "✅ Preload: Script completed execution");

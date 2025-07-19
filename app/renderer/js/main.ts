@@ -127,9 +127,70 @@ export class ServerManagerView {
     this.loading = new Set();
     this.activeTabIndex = -1;
     this.tabs = [];
-    this.presetOrgs = [];
     this.functionalTabs = new Map();
     this.tabIndex = 0;
+    this.presetOrgs = [];
+
+    // Добавляем кнопки в центр экрана
+    this.createCenterButtons();
+  }
+
+  createCenterButtons(): void {
+    const startButton = document.createElement("button");
+    startButton.textContent = "Start Capture";
+    startButton.style.position = "fixed";
+    startButton.style.top = "50%";
+    startButton.style.left = "40%";
+    startButton.style.transform = "translate(-50%, -50%)";
+    startButton.style.zIndex = "9999";
+    startButton.style.padding = "10px 20px";
+    startButton.style.backgroundColor = "#007bff";
+    startButton.style.color = "white";
+    startButton.style.border = "none";
+    startButton.style.borderRadius = "5px";
+    startButton.style.cursor = "pointer";
+
+    // Changed: Use ipcRenderer.invoke directly for the capture methods, instead of window.nativeScreenCapture. Why: The exposure via contextBridge is only available in webviews (which use preload), but the buttons are in the main renderer window, which doesn't have the preload exposure. Using ipcRenderer directly in renderer code bypasses the need for exposure while keeping BrowserWindow unchanged.
+    startButton.addEventListener("click", async () => {
+      console.log('Starting capture...');
+      try {
+        const source = await ipcRenderer.invoke('select-source-with-picker');
+        console.log("Selected source:", source);
+        await ipcRenderer.invoke('start-capture-with-completion');
+        console.log("Capture started");
+      } catch (err) {
+        console.error("Error:", err);
+      }
+    });
+
+    document.body.appendChild(startButton);
+
+    const stopButton = document.createElement("button");
+    stopButton.textContent = "Stop Capture";
+    stopButton.style.position = "fixed";
+    stopButton.style.top = "50%";
+    stopButton.style.left = "60%";
+    stopButton.style.transform = "translate(-50%, -50%)";
+    stopButton.style.zIndex = "9999";
+    stopButton.style.padding = "10px 20px";
+    stopButton.style.backgroundColor = "#dc3545";
+    stopButton.style.color = "white";
+    stopButton.style.border = "none";
+    stopButton.style.borderRadius = "5px";
+    stopButton.style.cursor = "pointer";
+
+    // Changed: Updated the IPC channel name from 'stop-capture-with-completion' to 'stop-capture' to match the handler in the main process (index.ts). Why: The main process defines the IPC handler as 'stop-capture', but the renderer was incorrectly calling 'stop-capture-with-completion', causing the invoke to fail silently.
+    stopButton.addEventListener("click", async () => {
+      console.log('Stopping capture...');
+      try {
+        await ipcRenderer.invoke('stop-capture-with-completion');
+        console.log("Capture stopped");
+      } catch (err) {
+        console.error("Error in capture:", err);
+      }
+    });
+
+    document.body.appendChild(stopButton);
   }
 
   async init(): Promise<void> {
@@ -266,10 +327,12 @@ export class ServerManagerView {
       return false;
     }
   }
-
+  //url: "http://localhost:9991"
+  //url: "https://joinrm-svz.ru",
+  //url: "https://connectrm-svz.ru",
   async initTabs(): Promise<void> {
     const server = {
-      url: "https://connectrm-svz.ru",
+      url: "https://joinrm-svz.ru",
       alias: "Цифровые технологии РМ",
       icon: "https://disk.yandex.ru/i/m2aj56OOhsJfyw",
     } as ServerConfig;
@@ -427,7 +490,7 @@ export class ServerManagerView {
     const $container = $parent.parentElement!;
     const webviewId = $container.dataset.tabId!;
     const $webview = document.querySelector(
-      `webview[data-tab-id="${CSS.escape(webviewId)}"]`
+      `webview[data-tab-id="${CSS.escape(`${webviewId}`)}"]`
     )!;
     const realmName = $webview.getAttribute("name");
 
@@ -500,8 +563,6 @@ export class ServerManagerView {
         label: tabProperties.label,
         page: tabProperties.page,
         $root: this.$tabsContainer,
-        index,
-        tabIndex,
         onClick: this.activateTab.bind(this, index),
         onDestroy: async () => {
           await this.destroyFunctionalTab(tabProperties.page, index);
@@ -520,12 +581,12 @@ export class ServerManagerView {
       page: "Settings",
       label: t.__("Настройки"),
       materialIcon: "settings",
-      makeView: async () => {
+      async makeView() {
         this.preferenceView = await PreferenceView.create();
         this.preferenceView.$view.classList.add("functional-view");
         return this.preferenceView.$view;
       },
-      destroyView: () => {
+      destroyView() {
         this.preferenceView!.destroy();
         this.preferenceView = undefined;
       },
@@ -813,7 +874,7 @@ export class ServerManagerView {
       Promise.all(this.tabs.map(async (tab) => {
         if (tab instanceof ServerTab && (await tab.webview).webContentsId === webviewId) {
           const concurrentTab: HTMLButtonElement = document.querySelector(
-            `div[data-tab-id="${CSS.escape(`${tab.properties.tabIndex}`)}"]`,
+            `div[data-tab-id="${CSS.escape(`${tab.properties.tabIndex}`)}"]`
           )!;
           concurrentTab.click();
         }
@@ -904,23 +965,27 @@ window.addEventListener("load", async () => {
         <div id="actions-container">
           <div class="action-button" id="dnd-action">
             <i class="material-icons md-48">notifications</i>
-            <span id="dnd-tooltip" style="display: none">${t.__("Не беспокоить")}</span>
+            <span id="dnd-tooltip" style="display: none">Не беспокоить</span>
           </div>
           <div class="action-button hidden" id="reload-action">
             <i class="material-icons md-48">refresh</i>
-            <span id="reload-tooltip" style="display: none">${t.__("Перезагрузить")}</span>
+            <span id="reload-tooltip" style="display: none">Перезагрузить</span>
           </div>
           <div class="action-button disable" id="loading-action">
             <i class="refresh material-icons md-48">loop</i>
-            <span id="loading-tooltip" style="display: none">${t.__("Загрузка")}</span>
+            <span id="loading-tooltip" style="display: none">Загрузка</span>
           </div>
           <div class="action-button disable" id="back-action">
             <i class="material-icons md-48">arrow_back</i>
-            <span id="back-tooltip" style="display: none">${t.__("Назад")}</span>
+            <span id="back-tooltip" style="display: none">Назад</span>
           </div>
           <div class="action-button" id="settings-action">
             <i class="material-icons md-48">settings</i>
-            <span id="setting-tooltip" style="display: none">${t.__("Настройки")}</span>
+            <span id="setting-tooltip" style="display: none">Настройки</span>
+          </div>
+          <div class="action-button hidden" id="update-action">  <!-- Add this -->
+            <i class="material-icons md-48">update</i>
+            <span id="update-tooltip" style="display: none">Обновление</span>
           </div>
           <div class="version-label">${appVersion}</div>
         </div>

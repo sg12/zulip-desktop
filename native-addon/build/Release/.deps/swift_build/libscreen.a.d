@@ -1,0 +1,1 @@
+cmd_swift_build/libscreen.a := LD_LIBRARY_PATH=/Users/sg12/zulip-desktop/native-addon/build/Release/lib.host:/Users/sg12/zulip-desktop/native-addon/build/Release/lib.target:$$LD_LIBRARY_PATH; export LD_LIBRARY_PATH; cd ../.; mkdir -p swift_build; ar rcs swift_build/libscreen.a swift_build/CaptureModule.o

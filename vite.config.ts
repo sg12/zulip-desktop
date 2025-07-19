@@ -1,7 +1,5 @@
 /* eslint-disable @typescript-eslint/naming-convention */
-
 import * as path from "node:path";
-
 import {defineConfig} from "vite";
 import electron from "vite-plugin-electron";
 
@@ -13,6 +11,9 @@ export default defineConfig({
           index: "app/main",
         },
         vite: {
+          define: {
+            'process.env.NODE_ENV': JSON.stringify('production'),
+          },
           build: {
             sourcemap: true,
             rollupOptions: {
@@ -35,6 +36,9 @@ export default defineConfig({
           preload: "app/renderer/js/preload.ts",
         },
         vite: {
+          define: {
+            'process.env.NODE_ENV': JSON.stringify('production'),
+          },
           build: {
             sourcemap: "inline",
             rollupOptions: {
@@ -48,6 +52,9 @@ export default defineConfig({
           renderer: "app/renderer/js/main.ts",
         },
         vite: {
+          define: {
+            'process.env.NODE_ENV': JSON.stringify('production'),
+          },
           build: {
             sourcemap: true,
             rollupOptions: {

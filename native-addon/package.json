@@ -1,0 +1,13 @@
+{
+  "name": "native-addon",
+  "version": "1.0.0",
+  "description": "Native addon for screen capture",
+  "main": "build/Release/addon",
+  "scripts": {
+    "install": "node-gyp rebuild",
+    "rebuild": "node-gyp rebuild"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.1.0"
+  }
+}
