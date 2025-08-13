@@ -87,6 +87,35 @@ export class NativeCaptureManager {
       this.registerHandlers();
     }
 
+    // В native-capture.ts добавьте метод для audio-only режима
+    async startAudioOnlyCapture(sourceId: string): Promise<{ success: boolean; error?: string }> {
+        if (!this.state.addon) {
+            return { success: false, error: "Native addon not loaded" };
+        }
+        
+        try {
+            // Устанавливаем минимальное качество видео (т.к. не используем)
+            // Это снизит нагрузку на Swift addon
+            if (typeof this.state.addon.setCaptureQuality === 'function') {
+                // Минимальное разрешение и FPS для экономии ресурсов
+                this.state.addon.setCaptureQuality(320, 240, 1);
+                log.info("Set minimal video quality for audio-only mode");
+            }
+            
+            // Или если в Swift есть метод отключения видео
+            if (typeof this.state.addon.setAudioOnlyMode === 'function') {
+                this.state.addon.setAudioOnlyMode(true);
+            }
+            
+            // Запускаем захват
+            return this.startCapture(sourceId);
+            
+        } catch (error: any) {
+            log.error(`Failed to start audio-only capture: ${error.message}`);
+            return { success: false, error: error.message };
+        }
+    }
+
     private loadAddon(): boolean {
       try {
         const possiblePaths = [
