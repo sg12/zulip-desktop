@@ -654,28 +654,128 @@ export class NativeCaptureManager {
     }
 
     async stopCapture(): Promise<{ success: boolean; error?: string }> {
-        if (!this.state.addon || !this.state.isCapturing) {
+        log.info("[NATIVE-CAPTURE] >>> stopCapture called");
+        
+        // Проверяем состояние перед остановкой
+        if (!this.state.addon) {
+            log.warn("[NATIVE-CAPTURE] No addon loaded");
+            return { success: true };
+        }
+        
+        if (!this.state.isCapturing) {
+            log.info("[NATIVE-CAPTURE] Already stopped");
             return { success: true };
         }
 
         try {
-            // stopCapture тоже возвращает Promise
-            const result = await this.state.addon.stopCapture();
-            log.info(`Stop capture result: ${JSON.stringify(result)}`);
+            // Сначала очищаем callbacks чтобы прекратить обработку кадров
+            this.setFrameCallbacks(undefined, undefined);
+            log.info("[NATIVE-CAPTURE] Callbacks cleared");
             
+            // Останавливаем захват
+            const result = await this.state.addon.stopCapture();
+            log.info(`[NATIVE-CAPTURE] Stop capture result: ${JSON.stringify(result)}`);
+            
+            // Сбрасываем состояние независимо от результата
             this.state.isCapturing = false;
             this.state.currentSourceId = null;
+            this.state.videoFrameCount = 0;
+            this.state.audioFrameCount = 0;
             
+            log.info("[NATIVE-CAPTURE] <<< stopCapture SUCCESS");
             return { success: true };
             
         } catch (error: any) {
-            log.error(`Failed to stop capture: ${error.message}`);
+            log.error(`[NATIVE-CAPTURE] Failed to stop capture: ${error.message}`);
             
-            // Force cleanup
+            // Даже при ошибке сбрасываем состояние
             this.state.isCapturing = false;
             this.state.currentSourceId = null;
+            this.state.videoFrameCount = 0;
+            this.state.audioFrameCount = 0;
+            
+            // Если ошибка говорит что поток уже остановлен, это нормально
+            if (error.message?.includes('already stopped')) {
+                log.info("[NATIVE-CAPTURE] Stream was already stopped, returning success");
+                return { success: true };
+            }
             
             return { success: false, error: error.message };
+        }
+    }
+
+    async forceStopCapture(): Promise<{ success: boolean; error?: string }> {
+        log.info("[NATIVE-CAPTURE] >>> FORCE STOP CAPTURE");
+        
+        // Сначала очищаем callbacks чтобы прекратить обработку
+        this.setFrameCallbacks(undefined, undefined);
+        log.info("[NATIVE-CAPTURE] Callbacks cleared");
+        
+        // Сбрасываем состояние независимо от результата
+        this.state.isCapturing = false;
+        this.state.currentSourceId = null;
+        this.state.videoFrameCount = 0;
+        this.state.audioFrameCount = 0;
+        
+        if (!this.state.addon) {
+            log.warn("[NATIVE-CAPTURE] No addon loaded");
+            return { success: true };
+        }
+        
+        try {
+            // Пробуем остановить несколько раз
+            for (let i = 0; i < 3; i++) {
+                try {
+                    log.info(`[NATIVE-CAPTURE] Stop attempt ${i + 1}`);
+                    const result = await this.state.addon.stopCapture();
+                    log.info(`[NATIVE-CAPTURE] Stop result: ${JSON.stringify(result)}`);
+                    
+                    // Ждем немного между попытками
+                    if (i < 2) {
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    }
+                } catch (e: any) {
+                    log.warn(`[NATIVE-CAPTURE] Stop attempt ${i + 1} error: ${e.message}`);
+                }
+            }
+            
+            log.info("[NATIVE-CAPTURE] <<< FORCE STOP COMPLETE");
+            return { success: true };
+            
+        } catch (error: any) {
+            log.error(`[NATIVE-CAPTURE] Force stop failed: ${error.message}`);
+            return { success: false, error: error.message };
+        }
+    }
+
+    // Добавьте диагностический метод
+    async debugCaptureState(): Promise<void> {
+        if (!this.state.addon) {
+            log.info("[NATIVE-CAPTURE] DEBUG: No addon");
+            return;
+        }
+        
+        log.info("[NATIVE-CAPTURE] DEBUG STATE:");
+        log.info(`  - isCapturing: ${this.state.isCapturing}`);
+        log.info(`  - currentSourceId: ${this.state.currentSourceId}`);
+        log.info(`  - videoFrameCount: ${this.state.videoFrameCount}`);
+        log.info(`  - audioFrameCount: ${this.state.audioFrameCount}`);
+        
+        // Проверяем доступные методы
+        const methods = ['stopCapture', 'forceStopCapture', 'resetCapture', 'getStreamState'];
+        for (const method of methods) {
+            const exists = typeof this.state.addon[method] === 'function';
+            log.info(`  - ${method}: ${exists ? 'EXISTS' : 'missing'}`);
+        }
+        
+        // Если есть метод получения состояния
+        if (typeof this.state.addon.getStreamState === 'function') {
+            try {
+                const state = await this.state.addon.getStreamState();
+                log.info(`  - Swift stream state: ${JSON.stringify(state)}`);
+            } catch (e: any) {
+                log.error(`  - Error getting stream state: ${e.message}`);
+            }
         }
     }
 

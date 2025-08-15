@@ -38,7 +38,6 @@ import { _getServerSettings, _isOnline, _saveServerIcon } from "./request.js";
 import { sentryInit } from "./sentry.js";
 import { setAutoLaunch } from "./startup.js";
 import { ipcMain, send } from "./typed-ipc-main.js";
-const { setupScreenSharingMain } = require('@jitsi/electron-sdk');
 
 import { NativeCaptureManager } from './native-capture';
 import { JitsiManager } from './jitsi-manager';

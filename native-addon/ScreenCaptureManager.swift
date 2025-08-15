@@ -660,7 +660,7 @@ actor CaptureActor {
             
         case .audio:
             // ВАЖНО: Добавляем подробное логирование
-            print("🎵 System audio buffer received, time: \(adjustedTime.seconds)")
+            //print("🎵 System audio buffer received, time: \(adjustedTime.seconds)")
             
             // Получаем информацию о формате для отладки
             if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {
@@ -668,14 +668,14 @@ actor CaptureActor {
                     let channelCount = asbd.pointee.mChannelsPerFrame
                     let sampleRate = asbd.pointee.mSampleRate
                     let formatID = asbd.pointee.mFormatID
-                    print("🎵 Audio format - Channels: \(channelCount), Sample Rate: \(sampleRate), Format: \(formatID)")
+                    //print("🎵 Audio format - Channels: \(channelCount), Sample Rate: \(sampleRate), Format: \(formatID)")
                     
                     // Проверяем формат аудио
-                    if formatID == kAudioFormatLinearPCM {
-                        print("🎵 Audio is Linear PCM - good for processing")
-                    } else {
-                        print("⚠️ Audio format is not Linear PCM: \(formatID)")
-                    }
+                    // if formatID == kAudioFormatLinearPCM {
+                    //     print("🎵 Audio is Linear PCM - good for processing")
+                    // } else {
+                    //     print("⚠️ Audio format is not Linear PCM: \(formatID)")
+                    // }
                 }
             }
             

@@ -3,6 +3,7 @@ import { BrowserWindow, ipcMain, webContents } from "electron";
 import * as path from "path";
 import log from "electron-log";
 import { NativeCaptureManager } from "./native-capture";
+import { JitsiScreenShareMonitor } from "./jitsi-screen-share-monitor";
 
 interface JitsiOptions {
   roomName: string;
@@ -269,7 +270,7 @@ export class JitsiManager {
     private videoQualityManager: VideoQualityManager;
     private performanceMonitoringInterval?: NodeJS.Timer;
 
-    private static handlersRegistered = false;
+    private activeMediaStreams: Set<string> = new Set();
 
     constructor(
         nativeCapture: NativeCaptureManager,
@@ -456,7 +457,22 @@ export class JitsiManager {
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
                 
-                return await this.injectNativeStream();
+                const result = await this.injectNativeStream();
+
+                // Диагностика ПЕРЕД созданием
+                log.info("[STREAM-ELECTRON] Diagnosis BEFORE create:");
+                await this.diagnoseDesktopTracks();
+
+                if (result.success) {
+                    log.info("[STREAM-ELECTRON] Diagnosis AFTER create:");
+                    await this.diagnoseDesktopTracks();
+                }
+        
+                // ДИАГНОСТИКА ПОСЛЕ
+                const stateAfter = await this.diagnoseJitsiState();
+                log.info("[STREAM-ELECTRON] State AFTER create:", JSON.stringify(stateAfter, null, 2));
+                
+                return result;
                 
             } catch (error: any) {
                 log.error("[STREAM-ELECTRON] Error creating native stream:", error);
@@ -464,6 +480,107 @@ export class JitsiManager {
             }
         });
 
+        ipcMain.handle("jitsi:stream-stopped", async () => {
+            log.info("[STREAM-ELECTRON] ===== STREAM STOPPED BY JITSI =====");
+            
+            // Диагностика перед остановкой
+            await this.nativeCapture.debugCaptureState();
+            
+            // Используем принудительную остановку
+            if (this.nativeCapture) {
+                log.info("[STREAM-ELECTRON] Force stopping native capture...");
+                const stopResult = await this.nativeCapture.forceStopCapture();
+                log.info(`[STREAM-ELECTRON] Force stop result: ${JSON.stringify(stopResult)}`);
+            }
+            
+            // Диагностика после остановки
+            await this.nativeCapture.debugCaptureState();
+            
+            // Очищаем stream в Jitsi окне
+            await this.cleanupStreamInJitsi();
+            
+            // Сбрасываем состояние
+            this.state.isStreamActive = false;
+            this.state.streamId = null;
+            this.state.videoFrameCount = 0;
+            this.state.audioFrameCount = 0;
+            
+            log.info("[STREAM-ELECTRON] ===== CLEANUP COMPLETED =====");
+            
+            return { success: true };
+        });
+
+        ipcMain.handle("jitsi:stop-native-capture", async () => {
+            log.info("[STREAM-ELECTRON] Stop native capture requested from monitor");
+            log.info(`[STREAM-ELECTRON] Active streams to stop: ${Array.from(this.activeMediaStreams).join(', ')}`);
+            
+            // Диагностика ДО остановки
+            log.info("[STREAM-ELECTRON] Diagnosis BEFORE stop:");
+            await this.diagnoseDesktopTracks();
+
+            // ДИАГНОСТИКА ДО ОСТАНОВКИ
+            const stateBefore = await this.diagnoseJitsiState();
+            log.info("[STREAM-ELECTRON] State BEFORE stop:", JSON.stringify(stateBefore, null, 2));
+
+            try {
+                // 1. НОВОЕ: Применяем ядерную очистку
+                await this.nukeClearAllStreams();
+                log.info("[STREAM-ELECTRON] Nuclear cleanup executed");
+                
+                // Небольшая задержка после ядерной очистки
+                await new Promise(resolve => setTimeout(resolve, 200));
+
+                await this.nukeClearAllStreams();
+                log.info("[STREAM-ELECTRON] Nuclear cleanup executed");
+                
+                // НОВОЕ: Принудительное освобождение ВСЕХ медиа ресурсов
+                await this.forceReleaseAllMediaResources();
+                
+                
+                // 2. Останавливаем native capture
+                if (this.nativeCapture && this.nativeCapture.isCapturing) {
+                    const stopResult = await this.nativeCapture.stopCapture();
+                    log.info(`[STREAM-ELECTRON] Native capture stopped: ${JSON.stringify(stopResult)}`);
+                }
+
+                // 3. НОВОЕ: Принудительная остановка через Electron API
+                await this.forceStopElectronCapture();
+                
+                // 3. Очищаем состояние менеджера
+                this.state.isStreamActive = false;
+                this.state.streamId = null;
+                this.state.videoFrameCount = 0;
+                this.state.audioFrameCount = 0;
+                
+                // 4. Очищаем callbacks
+                this.nativeCapture.setFrameCallbacks(undefined, undefined);
+                
+                // 5. Очищаем трекер streams
+                this.activeMediaStreams.clear();
+                log.info("[STREAM-ELECTRON] Stream tracker cleared");
+                
+                // 6. НОВОЕ: Принудительное освобождение desktop capture
+                await this.forceReleaseDesktopCapture();
+        
+                // 7. Увеличиваем задержку для полного освобождения
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+                await this.forceReleaseAllMediaResources();
+
+                log.info("[STREAM-ELECTRON] Diagnosis AFTER stop:");
+                await this.diagnoseDesktopTracks();
+
+                const stateAfter = await this.diagnoseJitsiState();
+                log.info("[STREAM-ELECTRON] State AFTER stop:", JSON.stringify(stateAfter, null, 2));
+                
+                log.info("[STREAM-ELECTRON] Complete cleanup finished");
+                return { success: true };
+                
+            } catch (error: any) {
+                log.error(`[STREAM-ELECTRON] Error stopping native capture: ${error.message}`);
+                return { success: false, error: error.message };
+            }
+        });
     }
 
     async getDebugInfo(): Promise<any> {
@@ -716,6 +833,147 @@ export class JitsiManager {
         return url;
     }
 
+    // Новый метод для базовых перехватчиков
+    private async injectNativeStreamInterceptors(): Promise<void> {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
+        
+        await this.state.window.webContents.executeJavaScript(`
+            (function() {
+                window.jitsiHandlersInjected = true;
+                console.log('[JitsiNative] Injecting base interceptors...');
+                
+                // Сохраняем оригинальные функции
+                const originalFunctions = {
+                    createLocalTracks: null,
+                    openDesktopPicker: null,
+                    obtainDesktopStream: null,
+                    getDisplayMedia: null,
+                    getUserMedia: null
+                };
+                
+                // === ПЕРЕХВАТ: JitsiMeetJS.createLocalTracks ===
+                if (window.JitsiMeetJS && window.JitsiMeetJS.createLocalTracks) {
+                    originalFunctions.createLocalTracks = window.JitsiMeetJS.createLocalTracks;
+                    
+                    window.JitsiMeetJS.createLocalTracks = async function(options) {
+                        console.log('[JitsiNative] createLocalTracks intercepted');
+                        
+                        if (options && options.devices && options.devices.includes('desktop')) {
+                            if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                                console.log('[JitsiNative] Using native stream');
+                                
+                                // Временно подменяем getUserMedia
+                                const tempGetUserMedia = navigator.mediaDevices.getUserMedia;
+                                navigator.mediaDevices.getUserMedia = async function(constraints) {
+                                    if (constraints?.video?.mandatory?.chromeMediaSource === 'desktop') {
+                                        return window.jitsiNativeMediaStream;
+                                    }
+                                    return tempGetUserMedia.call(this, constraints);
+                                };
+                                
+                                const tracks = await originalFunctions.createLocalTracks.call(this, options);
+                                navigator.mediaDevices.getUserMedia = tempGetUserMedia;
+                                
+                                return tracks;
+                            }
+                        }
+                        
+                        return originalFunctions.createLocalTracks.call(this, options);
+                    };
+                }
+                
+                // === ПЕРЕХВАТ: getDisplayMedia (глобальный) ===
+                if (!window.originalGetDisplayMedia) {
+                    window.originalGetDisplayMedia = navigator.mediaDevices.getDisplayMedia;
+                    
+                    navigator.mediaDevices.getDisplayMedia = async function(constraints) {
+                        if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                            console.log('[JitsiNative] Returning native stream from getDisplayMedia');
+                            return window.jitsiNativeMediaStream;
+                        }
+                        return window.originalGetDisplayMedia.call(this, constraints);
+                    };
+                }
+                
+                console.log('[JitsiNative] ✅ Base interceptors installed');
+            })();
+        `);
+    }
+
+    // Новый метод для UI элементов
+    private async injectUIElements(): Promise<void> {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
+        
+        await this.state.window.webContents.executeJavaScript(`
+            (function() {
+                // Debug индикатор
+                if (!document.getElementById('stream-debug-indicator')) {
+                    const debugIndicator = document.createElement('div');
+                    debugIndicator.id = 'stream-debug-indicator';
+                    debugIndicator.style.cssText = \`
+                        position: fixed;
+                        top: 10px;
+                        left: 10px;
+                        background: rgba(0, 0, 0, 0.8);
+                        color: white;
+                        padding: 10px 15px;
+                        border-radius: 8px;
+                        z-index: 100000;
+                        font-family: monospace;
+                        font-size: 12px;
+                        min-width: 200px;
+                        box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+                    \`;
+                    debugIndicator.innerHTML = \`
+                        <div style="font-weight: bold; margin-bottom: 5px;">🎯 Native Stream Debug</div>
+                        <div>Type: <span id="source-type" style="color: #ffa726;">Not set</span></div>
+                        <div>Native Active: <span id="native-status" style="color: #ef5350;">No</span></div>
+                        <div>Stream ID: <span id="stream-id" style="font-size: 10px;">None</span></div>
+                    \`;
+                    document.body.appendChild(debugIndicator);
+                }
+                
+                // Функция обновления индикатора
+                window.updateDebugIndicator = function() {
+                    const typeEl = document.getElementById('source-type');
+                    const statusEl = document.getElementById('native-status');
+                    const idEl = document.getElementById('stream-id');
+                    const indicator = document.getElementById('stream-debug-indicator');
+                    
+                    if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                        if (typeEl) typeEl.textContent = 'NATIVE';
+                        if (statusEl) {
+                            statusEl.textContent = 'Active';
+                            statusEl.style.color = '#66bb6a';
+                        }
+                        if (idEl) idEl.textContent = window.jitsiNativeMediaStream.id.substring(0, 8) + '...';
+                        if (indicator) {
+                            indicator.style.background = 'linear-gradient(135deg, rgba(76, 175, 80, 0.95), rgba(102, 187, 106, 0.95))';
+                        }
+                    } else {
+                        if (typeEl) typeEl.textContent = 'None';
+                        if (statusEl) {
+                            statusEl.textContent = 'No';
+                            statusEl.style.color = '#ef5350';
+                        }
+                        if (idEl) idEl.textContent = 'None';
+                        if (indicator) {
+                            indicator.style.background = 'rgba(0, 0, 0, 0.8)';
+                        }
+                    }
+                };
+                
+                // Обновляем индикатор периодически
+                setInterval(window.updateDebugIndicator, 500);
+                
+                // Кнопка Native Stream
+                ${this.getNativeStreamButtonCode()}
+                
+                console.log('[JitsiNative] ✅ UI elements injected');
+            })();
+        `);
+    }
+
     private async injectHandlers(): Promise<void> {
         if (!this.state.window || this.state.window.isDestroyed()) return;
 
@@ -751,301 +1009,19 @@ export class JitsiManager {
                 return;
             }
 
-            await this.state.window.webContents.executeJavaScript(`
-                (function() {
-                    // Помечаем, что инжекция выполнена
-                    if (window.jitsiHandlersInjected) {
-                        console.log('[JitsiNative] Handlers already injected');
-                        return;
-                    }
-                    window.jitsiHandlersInjected = true;
-                    
-                    console.log('[JitsiNative] Starting complete injection...');
-                    
-                    // === ОТЛАДОЧНЫЙ ИНДИКАТОР ===
-                    if (!document.getElementById('stream-debug-indicator')) {
-                        const debugIndicator = document.createElement('div');
-                        debugIndicator.id = 'stream-debug-indicator';
-                        debugIndicator.style.cssText = \`
-                            position: fixed;
-                            top: 10px;
-                            left: 10px;
-                            background: rgba(0, 0, 0, 0.8);
-                            color: white;
-                            padding: 10px 15px;
-                            border-radius: 8px;
-                            z-index: 100000;
-                            font-family: monospace;
-                            font-size: 12px;
-                            min-width: 200px;
-                            box-shadow: 0 2px 10px rgba(0,0,0,0.5);
-                        \`;
-                        debugIndicator.innerHTML = \`
-                            <div style="font-weight: bold; margin-bottom: 5px;">🎯 Native Stream Debug</div>
-                            <div>Type: <span id="source-type" style="color: #ffa726;">Not set</span></div>
-                            <div>Native Active: <span id="native-status" style="color: #ef5350;">No</span></div>
-                            <div>Stream ID: <span id="stream-id" style="font-size: 10px;">None</span></div>
-                        \`;
-                        document.body.appendChild(debugIndicator);
-                    }
-                    
-                    // Функция обновления индикатора
-                    function updateDebugIndicator() {
-                        const typeEl = document.getElementById('source-type');
-                        const statusEl = document.getElementById('native-status');
-                        const idEl = document.getElementById('stream-id');
-                        const indicator = document.getElementById('stream-debug-indicator');
-                        
-                        if (window.jitsiNativeMediaStream && window.isNativeActive) {
-                            if (typeEl) typeEl.textContent = 'NATIVE';
-                            if (statusEl) {
-                                statusEl.textContent = 'Active';
-                                statusEl.style.color = '#66bb6a';
-                            }
-                            if (idEl) idEl.textContent = window.jitsiNativeMediaStream.id.substring(0, 8) + '...';
-                            if (indicator) {
-                                indicator.style.background = 'linear-gradient(135deg, rgba(76, 175, 80, 0.95), rgba(102, 187, 106, 0.95))';
-                            }
-                        } else {
-                            if (typeEl) typeEl.textContent = 'None';
-                            if (statusEl) {
-                                statusEl.textContent = 'No';
-                                statusEl.style.color = '#ef5350';
-                            }
-                            if (idEl) idEl.textContent = 'None';
-                            if (indicator) {
-                                indicator.style.background = 'rgba(0, 0, 0, 0.8)';
-                            }
-                        }
-                    }
-                    
-                    setInterval(updateDebugIndicator, 500);
-                    
-                    // === СОХРАНЯЕМ ОРИГИНАЛЬНЫЕ ФУНКЦИИ ===
-                    const originalFunctions = {
-                        openDesktopPicker: null,
-                        obtainDesktopStream: null,
-                        createLocalTracks: null,
-                        getDisplayMedia: null,
-                        getUserMedia: null
-                    };
-                    
-                    // === КРИТИЧЕСКИЙ ПЕРЕХВАТ: JitsiMeetJS.createLocalTracks ===
-                    if (window.JitsiMeetJS && window.JitsiMeetJS.createLocalTracks) {
-                        console.log('[JitsiNative] Saving original createLocalTracks');
-                        originalFunctions.createLocalTracks = window.JitsiMeetJS.createLocalTracks;
-                        
-                        window.JitsiMeetJS.createLocalTracks = async function(options) {
-                            console.log('[JitsiNative] createLocalTracks intercepted, options:', options);
-                            
-                            // Проверяем, запрашивается ли desktop
-                            if (options && options.devices && options.devices.includes('desktop')) {
-                                console.log('[JitsiNative] Desktop track requested');
-                                
-                                // Проверяем наличие native stream
-                                if (window.jitsiNativeMediaStream && window.isNativeActive) {
-                                    console.log('[JitsiNative] 🎯 Native stream available, injecting it...');
-                                    
-                                    try {
-                                        // КРИТИЧЕСКИЙ ТРЮК: Временно подменяем getUserMedia и getDisplayMedia
-                                        const tempGetUserMedia = navigator.mediaDevices.getUserMedia;
-                                        const tempGetDisplayMedia = navigator.mediaDevices.getDisplayMedia;
-                                        
-                                        // Подменяем getUserMedia
-                                        navigator.mediaDevices.getUserMedia = async function(constraints) {
-                                            console.log('[JitsiNative] getUserMedia intercepted in createLocalTracks');
-                                            if (constraints && constraints.video && 
-                                                constraints.video.mandatory && 
-                                                constraints.video.mandatory.chromeMediaSource === 'desktop') {
-                                                console.log('[JitsiNative] Returning native stream for desktop getUserMedia');
-                                                return window.jitsiNativeMediaStream;
-                                            }
-                                            return tempGetUserMedia.call(this, constraints);
-                                        };
-                                        
-                                        // Подменяем getDisplayMedia
-                                        navigator.mediaDevices.getDisplayMedia = async function(constraints) {
-                                            console.log('[JitsiNative] getDisplayMedia intercepted in createLocalTracks');
-                                            console.log('[JitsiNative] 🎯 RETURNING NATIVE STREAM!');
-                                            return window.jitsiNativeMediaStream;
-                                        };
-                                        
-                                        // Вызываем оригинальную функцию с подмененными методами
-                                        console.log('[JitsiNative] Calling original createLocalTracks...');
-                                        const tracks = await originalFunctions.createLocalTracks.call(this, options);
-                                        
-                                        // Восстанавливаем оригинальные методы
-                                        navigator.mediaDevices.getUserMedia = tempGetUserMedia;
-                                        navigator.mediaDevices.getDisplayMedia = tempGetDisplayMedia;
-                                        
-                                        if (tracks && tracks.length > 0) {
-                                            console.log('[JitsiNative] ✅ JitsiLocalTrack created successfully with native stream');
-                                            
-                                            // Добавляем обработчик остановки
-                                            const originalDispose = tracks[0].dispose;
-                                            tracks[0].dispose = function() {
-                                                console.log('[JitsiNative] Track dispose called');
-                                                window.isNativeActive = false;
-                                                updateDebugIndicator();
-                                                if (originalDispose) {
-                                                    return originalDispose.call(this);
-                                                }
-                                            };
-                                        }
-                                        
-                                        return tracks;
-                                        
-                                    } catch (e) {
-                                        console.error('[JitsiNative] Error in createLocalTracks:', e);
-                                        // Восстанавливаем методы в случае ошибки
-                                        navigator.mediaDevices.getUserMedia = tempGetUserMedia;
-                                        navigator.mediaDevices.getDisplayMedia = tempGetDisplayMedia;
-                                        throw e;
-                                    }
-                                }
-                            }
-                            
-                            // Для других типов треков вызываем оригинальную функцию
-                            return originalFunctions.createLocalTracks.call(this, options);
-                        };
-                        
-                        console.log('[JitsiNative] ✅ createLocalTracks intercepted');
-                    }
-                    
-                    // === ПЕРЕХВАТ JitsiMeetScreenObtainer (для диалога выбора) ===
-                    if (window.JitsiMeetScreenObtainer) {
-                        console.log('[JitsiNative] Setting up JitsiMeetScreenObtainer interceptors');
-                        
-                        // openDesktopPicker - для выбора источника
-                        if (window.JitsiMeetScreenObtainer.openDesktopPicker) {
-                            originalFunctions.openDesktopPicker = window.JitsiMeetScreenObtainer.openDesktopPicker;
-                            
-                            window.JitsiMeetScreenObtainer.openDesktopPicker = function(options, callback) {
-                                console.log('[JitsiNative] openDesktopPicker intercepted');
-                                
-                                // Если есть native stream, сразу возвращаем его
-                                if (window.jitsiNativeMediaStream && window.isNativeActive) {
-                                    console.log('[JitsiNative] Native stream active, auto-selecting');
-                                    setTimeout(() => {
-                                        const sourceId = 'native:stream:' + Date.now();
-                                        callback(sourceId, { audio: true, screenShareAudio: true });
-                                    }, 100);
-                                    return;
-                                }
-                                
-                                // Иначе вызываем оригинальный метод (или показываем диалог выбора)
-                                return originalFunctions.openDesktopPicker.call(this, options, callback);
-                            };
-                        }
-                        
-                        // obtainDesktopStream - для получения stream по sourceId
-                        if (window.JitsiMeetScreenObtainer.obtainDesktopStream) {
-                            originalFunctions.obtainDesktopStream = window.JitsiMeetScreenObtainer.obtainDesktopStream;
-                            
-                            window.JitsiMeetScreenObtainer.obtainDesktopStream = function(sourceId, callback, errorCallback) {
-                                console.log('[JitsiNative] obtainDesktopStream intercepted, sourceId:', sourceId);
-                                
-                                if (window.jitsiNativeMediaStream && window.isNativeActive) {
-                                    console.log('[JitsiNative] Returning native stream from obtainDesktopStream');
-                                    setTimeout(() => {
-                                        callback(window.jitsiNativeMediaStream);
-                                    }, 100);
-                                    return;
-                                }
-                                
-                                return originalFunctions.obtainDesktopStream.call(this, sourceId, callback, errorCallback);
-                            };
-                        }
-                        
-                        console.log('[JitsiNative] ✅ JitsiMeetScreenObtainer intercepted');
-                    }
-                    
-                    // === ПОСТОЯННЫЕ ПЕРЕХВАТЫ (на всякий случай) ===
-                    if (!window.originalGetDisplayMedia) {
-                        originalFunctions.getDisplayMedia = navigator.mediaDevices.getDisplayMedia;
-                        
-                        navigator.mediaDevices.getDisplayMedia = async function(constraints) {
-                            console.log('[JitsiNative] Global getDisplayMedia intercepted');
-                            
-                            if (window.jitsiNativeMediaStream && window.isNativeActive) {
-                                console.log('[JitsiNative] 🎯 Returning native stream from global getDisplayMedia');
-                                return window.jitsiNativeMediaStream;
-                            }
-                            
-                            return originalFunctions.getDisplayMedia.call(this, constraints);
-                        };
-                    }
-                    
-                    if (!window.originalGetUserMedia) {
-                        originalFunctions.getUserMedia = navigator.mediaDevices.getUserMedia;
-                        
-                        navigator.mediaDevices.getUserMedia = async function(constraints) {
-                            if (constraints && constraints.video && 
-                                constraints.video.mandatory && 
-                                constraints.video.mandatory.chromeMediaSource === 'desktop') {
-                                console.log('[JitsiNative] Global getUserMedia for desktop intercepted');
-                                
-                                if (window.jitsiNativeMediaStream && window.isNativeActive) {
-                                    console.log('[JitsiNative] 🎯 Returning native stream from global getUserMedia');
-                                    return window.jitsiNativeMediaStream;
-                                }
-                            }
-                            
-                            return originalFunctions.getUserMedia.call(this, constraints);
-                        };
-                    }
-                    
-                    // === ФУНКЦИЯ ОЧИСТКИ ===
-                    window.cleanupNativeStream = function() {
-                        console.log('[JitsiNative] Cleaning up...');
-                        
-                        // Останавливаем stream
-                        if (window.jitsiNativeMediaStream) {
-                            window.jitsiNativeMediaStream.getTracks().forEach(track => track.stop());
-                        }
-                        
-                        // Восстанавливаем оригинальные функции
-                        if (originalFunctions.createLocalTracks && window.JitsiMeetJS) {
-                            window.JitsiMeetJS.createLocalTracks = originalFunctions.createLocalTracks;
-                        }
-                        if (originalFunctions.openDesktopPicker && window.JitsiMeetScreenObtainer) {
-                            window.JitsiMeetScreenObtainer.openDesktopPicker = originalFunctions.openDesktopPicker;
-                        }
-                        if (originalFunctions.obtainDesktopStream && window.JitsiMeetScreenObtainer) {
-                            window.JitsiMeetScreenObtainer.obtainDesktopStream = originalFunctions.obtainDesktopStream;
-                        }
-                        if (originalFunctions.getDisplayMedia) {
-                            navigator.mediaDevices.getDisplayMedia = originalFunctions.getDisplayMedia;
-                        }
-                        if (originalFunctions.getUserMedia) {
-                            navigator.mediaDevices.getUserMedia = originalFunctions.getUserMedia;
-                        }
-                        
-                        window.isNativeActive = false;
-                        window.jitsiNativeMediaStream = null;
-                        
-                        updateDebugIndicator();
-                        console.log('[JitsiNative] Cleanup complete');
-                    };
-                    
-                    console.log('[JitsiNative] ✅ Complete injection finished!');
-                    console.log('[JitsiNative] Key intercepts:');
-                    console.log('  - JitsiMeetJS.createLocalTracks: ' + (!!originalFunctions.createLocalTracks));
-                    console.log('  - JitsiMeetScreenObtainer.openDesktopPicker: ' + (!!originalFunctions.openDesktopPicker));
-                    console.log('  - navigator.mediaDevices.getDisplayMedia: ' + (!!originalFunctions.getDisplayMedia));
-                    
-                    return true;
-                })();
-            `);
+            // 1. Инжектируем базовые перехватчики для Native Stream
+            await this.injectNativeStreamInterceptors();
+            
+            // 2. Инжектируем централизованный монитор
+            const monitor = new JitsiScreenShareMonitor();
+            await monitor.injectMonitor(this.state.window);
+            
+            // 3. Инжектируем UI элементы
+            await this.injectUIElements();
 
             // Инжектируем перехватчик выбора источников (теперь он будет работать вместе с основным кодом)
             await this.state.window.webContents.executeJavaScript(`
                 ${this.getScreenShareInterceptorCode()}
-            `);
-
-            // Добавляем кнопку native stream
-            await this.state.window.webContents.executeJavaScript(`
-                ${this.getNativeStreamButtonCode()}
             `);
 
             log.info("✅ Handlers injected successfully");
@@ -1104,44 +1080,129 @@ export class JitsiManager {
         `;
     }
 
-    // Вспомогательный метод для показа системного диалога
-    private async showSystemPicker(): Promise<{ success: boolean; sourceId?: string }> {
+    private async cleanupStreamInJitsi(): Promise<void> {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
+        
         try {
-            // Используем Electron's desktopCapturer как fallback
-            const sources = await desktopCapturer.getSources({
-                types: ['screen', 'window'],
-                thumbnailSize: { width: 300, height: 200 }
-            });
-            
-            if (sources.length === 0) {
-                return { success: false };
-            }
-            
-            // Для простоты берем первый экран
-            const screen = sources.find(s => s.id.startsWith('screen:')) || sources[0];
-            
-            log.info(`System picker: selected ${screen.id}`);
-            return { success: true, sourceId: screen.id };
-            
+            await this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    console.log('[STREAM-ELECTRON] Cleaning up streams in Jitsi...');
+                    
+                    // Останавливаем все треки
+                    if (window.jitsiNativeMediaStream) {
+                        window.jitsiNativeMediaStream.getTracks().forEach(track => {
+                            track.stop();
+                            console.log('[STREAM-ELECTRON] Stopped native track:', track.kind);
+                        });
+                        window.jitsiNativeMediaStream = null;
+                    }
+                    
+                    if (window.electronVideoStream) {
+                        window.electronVideoStream.getTracks().forEach(track => {
+                            track.stop();
+                            console.log('[STREAM-ELECTRON] Stopped electron track:', track.kind);
+                        });
+                        window.electronVideoStream = null;
+                    }
+                    
+                    // Закрываем audio context
+                    if (window.nativeAudioContext) {
+                        if (window.nativeAudioContext.state !== 'closed') {
+                            window.nativeAudioContext.close();
+                            console.log('[STREAM-ELECTRON] Audio context closed');
+                        }
+                        window.nativeAudioContext = null;
+                    }
+                    
+                    // Очищаем буферы и флаги
+                    window.leftRingBuffer = null;
+                    window.rightRingBuffer = null;
+                    window.isNativeActive = false;
+                    window.isHybridMode = false;
+                    window.audioCounter = 0;
+                    window.videoFrameCounter = 0;
+                    
+                    // Обновляем индикатор
+                    if (typeof updateDebugIndicator === 'function') {
+                        updateDebugIndicator();
+                    }
+                    
+                    console.log('[STREAM-ELECTRON] Cleanup completed');
+                    return true;
+                })();
+            `);
         } catch (error: any) {
-            log.error(`System picker error: ${error.message}`);
-            return { success: false };
+            log.error(`[STREAM-ELECTRON] Error cleaning up in Jitsi: ${error.message}`);
         }
     }
-
-
 
     // ===== ГЛАВНАЯ ФУНКЦИЯ =====
     async injectNativeStream(): Promise<{ success: boolean; error?: string; streamId?: string }> {
         log.info("[STREAM-ELECTRON] === START injectNativeStream ===");
-        
-        // Проверяем, не активен ли уже stream
-        if (this.state.isStreamActive) {
-            log.warn("[STREAM-ELECTRON] Stream already active, stopping previous...");
-            await this.cleanup();
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
 
+        try {
+            // Останавливаем ВСЕ существующие потоки
+            if (this.state.window && !this.state.window.isDestroyed()) {
+                await this.state.window.webContents.executeJavaScript(`
+                    (function() {
+                        // Останавливаем все video tracks от Electron
+                        if (window.electronVideoStream) {
+                            window.electronVideoStream.getTracks().forEach(track => {
+                                track.stop();
+                            });
+                            window.electronVideoStream = null;
+                        }
+                        
+                        // Останавливаем все tracks от native stream
+                        if (window.jitsiNativeMediaStream) {
+                            window.jitsiNativeMediaStream.getTracks().forEach(track => {
+                                track.stop();
+                            });
+                            window.jitsiNativeMediaStream = null;
+                        }
+                        
+                        // Закрываем audio context
+                        if (window.nativeAudioContext && window.nativeAudioContext.state !== 'closed') {
+                            window.nativeAudioContext.close();
+                            window.nativeAudioContext = null;
+                        }
+                        
+                        window.isNativeActive = false;
+                        window.isHybridMode = false;
+                        
+                        console.log('[STREAM-ELECTRON] Previous streams cleaned');
+                        return true;
+                    })();
+                `);
+            }
+            
+            // Останавливаем native capture если активен
+            if (this.nativeCapture && this.nativeCapture.isCapturing) {
+                log.warn("[STREAM-ELECTRON] ⚠️ Native capture still running, stopping it...");
+                const stopResult = await this.nativeCapture.stopCapture();
+                log.info(`[STREAM-ELECTRON] Stop result: ${JSON.stringify(stopResult)}`);
+                
+                // Ждем полной остановки
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        } catch (cleanupError: any) {
+            log.error(`[STREAM-ELECTRON] Cleanup error: ${cleanupError.message}`);
+        }
+        
+        // Сбрасываем состояние
+        this.state.isStreamActive = false;
+        this.state.streamId = null;
+        this.state.videoFrameCount = 0;
+        this.state.audioFrameCount = 0;
+        
+        // Ждем очистки
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        if (!this.state.window || this.state.window.isDestroyed()) {
+            log.error("[STREAM-ELECTRON] No active Jitsi window");
+            return { success: false, error: "No active Jitsi window" };
+        }
+        
         if (!this.state.window || this.state.window.isDestroyed()) {
             log.error("[STREAM-ELECTRON] No active Jitsi window");
             return { success: false, error: "No active Jitsi window" };
@@ -1344,30 +1405,134 @@ export class JitsiManager {
             return { success: false, error: "No window" };
         }
         
-        // ВАЖНО: Получаем текущие настройки качества
         const qualitySettings = this.videoQualityManager.getCurrentSettings();
-        log.info(`[STREAM-ELECTRON] Using quality preset: ${qualitySettings.name} - ${qualitySettings.description}`);
-        log.info(`[STREAM-ELECTRON] Video constraints: ${qualitySettings.width.min}-${qualitySettings.width.max}x${qualitySettings.height.min}-${qualitySettings.height.max} @ ${qualitySettings.frameRate.min}-${qualitySettings.frameRate.max}fps`);
+        log.info(`[STREAM-ELECTRON] Using quality preset: ${qualitySettings.name}`);
         
+        // ВАЖНО: Передаем список активных streams для очистки
+        const activeStreamsJson = JSON.stringify(Array.from(this.activeMediaStreams));
+        
+        const timeoutPromise = new Promise((resolve) => {
+            setTimeout(() => {
+                resolve({ success: false, error: "Timeout creating stream" });
+            }, 10000);
+        });
+
         try {
-            const result = await this.state.window.webContents.executeJavaScript(`
+            const createPromise = this.state.window.webContents.executeJavaScript(`
                 (async function() {
                     console.log('[STREAM-ELECTRON] Creating hybrid stream...');
-                    console.log('[STREAM-ELECTRON] Quality settings:', {
-                        width: { min: ${qualitySettings.width.min}, max: ${qualitySettings.width.max} },
-                        height: { min: ${qualitySettings.height.min}, max: ${qualitySettings.height.max} },
-                        frameRate: { min: ${qualitySettings.frameRate.min}, max: ${qualitySettings.frameRate.max} }
-                    });
+                    console.log('[STREAM-ELECTRON] Known active streams:', ${activeStreamsJson});
+                    
+                    // Глобальный трекер всех streams
+                    if (!window.__allMediaStreams) {
+                        window.__allMediaStreams = new Map();
+                    }
+                    
+                    // КРИТИЧНО: Останавливаем и удаляем ВСЕ известные streams из трекера
+                    const stopAllKnownStreams = () => {
+                        console.log('[STREAM-ELECTRON] Stopping ALL known streams...');
+                        
+                        // Останавливаем streams из переданного списка
+                        const knownStreamIds = ${activeStreamsJson};
+                        knownStreamIds.forEach(streamId => {
+                            const stream = window.__allMediaStreams.get(streamId);
+                            if (stream) {
+                                stream.getTracks().forEach(track => {
+                                    if (track.readyState === 'live') {
+                                        track.stop();
+                                        console.log('[STREAM-ELECTRON] Stopped tracked stream track:', track.kind, 'from stream:', streamId);
+                                    }
+                                });
+                                // ВАЖНО: Удаляем из Map
+                                window.__allMediaStreams.delete(streamId);
+                            }
+                        });
+                        
+                        // НОВОЕ: Также проверяем и останавливаем любые другие video streams в трекере
+                        const allStreamIds = Array.from(window.__allMediaStreams.keys());
+                        console.log('[STREAM-ELECTRON] All streams in tracker before cleanup:', allStreamIds);
+                        
+                        window.__allMediaStreams.forEach((stream, id) => {
+                            // Проверяем, есть ли video треки (это desktop capture)
+                            const videoTracks = stream.getVideoTracks();
+                            if (videoTracks.length > 0) {
+                                console.log('[STREAM-ELECTRON] Found orphaned video stream:', id);
+                                stream.getTracks().forEach(track => {
+                                    if (track.readyState === 'live') {
+                                        track.stop();
+                                        console.log('[STREAM-ELECTRON] Stopped orphaned track:', track.kind, track.id);
+                                    }
+                                });
+                                // Удаляем из трекера
+                                window.__allMediaStreams.delete(id);
+                            }
+                        });
+                        
+                        // Останавливаем window.electronVideoStream
+                        if (window.electronVideoStream) {
+                            window.electronVideoStream.getTracks().forEach(track => {
+                                if (track.readyState === 'live') {
+                                    track.stop();
+                                    console.log('[STREAM-ELECTRON] Stopped electron video track:', track.id);
+                                }
+                            });
+                            // Удаляем из трекера если есть
+                            if (window.__allMediaStreams.has(window.electronVideoStream.id)) {
+                                window.__allMediaStreams.delete(window.electronVideoStream.id);
+                            }
+                            window.electronVideoStream = null;
+                        }
+                        
+                        // Останавливаем window.jitsiNativeMediaStream
+                        if (window.jitsiNativeMediaStream) {
+                            window.jitsiNativeMediaStream.getTracks().forEach(track => {
+                                if (track.readyState === 'live') {
+                                    track.stop();
+                                    console.log('[STREAM-ELECTRON] Stopped native stream track:', track.id);
+                                }
+                            });
+                            // Удаляем из трекера если есть
+                            if (window.__allMediaStreams.has(window.jitsiNativeMediaStream.id)) {
+                                window.__allMediaStreams.delete(window.jitsiNativeMediaStream.id);
+                            }
+                            window.jitsiNativeMediaStream = null;
+                        }
+                        
+                        console.log('[STREAM-ELECTRON] Tracker after cleanup:', Array.from(window.__allMediaStreams.keys()));
+                        
+                        // Закрываем audio context
+                        if (window.nativeAudioContext) {
+                            if (window.nativeAudioContext.state !== 'closed') {
+                                window.nativeAudioContext.close();
+                            }
+                            window.nativeAudioContext = null;
+                        }
+                        
+                        // Очищаем все ссылки
+                        window.leftRingBuffer = null;
+                        window.rightRingBuffer = null;
+                        window.audioCounter = 0;
+                        window.videoFrameCounter = 0;
+                        window.isNativeActive = false;
+                        window.isHybridMode = false;
+                    };
+                    
+                    // Выполняем полную очистку
+                    stopAllKnownStreams();
+                    
+                    // Ждем освобождения ресурсов
+                    await new Promise(resolve => setTimeout(resolve, 300));
                     
                     try {
-                        // 1. Получаем VIDEO от Electron С ЗАДАННЫМ КАЧЕСТВОМ
+                        // Получаем VIDEO от Electron
+                        console.log('[STREAM-ELECTRON] Requesting new video stream...');
+                        
                         const videoStream = await navigator.mediaDevices.getUserMedia({
                             audio: false,
                             video: {
                                 mandatory: {
                                     chromeMediaSource: 'desktop',
                                     chromeMediaSourceId: '${electronSourceId}',
-                                    // ИСПОЛЬЗУЕМ НАСТРОЙКИ ИЗ videoQualityManager
                                     minWidth: ${qualitySettings.width.min},
                                     maxWidth: ${qualitySettings.width.max},
                                     minHeight: ${qualitySettings.height.min},
@@ -1378,148 +1543,71 @@ export class JitsiManager {
                             }
                         });
                         
-                        const videoTrack = videoStream.getVideoTracks()[0];
-                        const actualSettings = videoTrack.getSettings();
-                        
-                        console.log('[STREAM-ELECTRON] Requested quality:', '${qualitySettings.name}');
-                        console.log('[STREAM-ELECTRON] Actual video:', actualSettings.width + 'x' + actualSettings.height + '@' + actualSettings.frameRate + 'fps');
-                        
-                        // Проверяем, что получили нужное качество
-                        if (actualSettings.width > ${qualitySettings.width.max} || 
-                            actualSettings.height > ${qualitySettings.height.max}) {
-                            console.warn('[STREAM-ELECTRON] ⚠️ Quality higher than requested!');
+                        if (!videoStream || videoStream.getVideoTracks().length === 0) {
+                            throw new Error('Failed to get video stream');
                         }
                         
-                        // Визуальный индикатор с названием пресета
-                        const qualityBadge = document.createElement('div');
-                        qualityBadge.id = 'electron-video-badge';
-                        qualityBadge.style.cssText = \`
-                            position: fixed;
-                            top: 60px;
-                            right: 10px;
-                            background: \${actualSettings.width >= 1280 ? '#4CAF50' : 
-                                        actualSettings.width >= 640 ? '#FF9800' : '#F44336'};
-                            color: white;
-                            padding: 10px 15px;
-                            border-radius: 8px;
-                            font-family: monospace;
-                            font-size: 12px;
-                            font-weight: bold;
-                            z-index: 100001;
-                            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-                        \`;
-                        qualityBadge.innerHTML = \`
-                            <div>ELECTRON VIDEO</div>
-                            <div style="font-size: 14px;">${qualitySettings.name}</div>
-                            <div>\${actualSettings.width}x\${actualSettings.height}@\${Math.round(actualSettings.frameRate)}fps</div>
-                        \`;
+                        // ВАЖНО: Добавляем stream в трекер
+                        window.__allMediaStreams.set(videoStream.id, videoStream);
+                        console.log('[STREAM-ELECTRON] Added stream to tracker:', videoStream.id);
                         
-                        const oldBadge = document.getElementById('electron-video-badge');
-                        if (oldBadge) oldBadge.remove();
-                        document.body.appendChild(qualityBadge);
+                        // Сохраняем
+                        window.electronVideoStream = videoStream;
                         
-                        // 2. Создаем AUDIO контекст для Native (код без изменений)
-                        const audioContext = new AudioContext({ 
+                        const videoTrack = videoStream.getVideoTracks()[0];
+                        const actualSettings = videoTrack.getSettings();
+                        console.log('[STREAM-ELECTRON] New video track created:', videoTrack.id, 'state:', videoTrack.readyState);
+                        
+                        // Создаем аудио контекст (код остается тот же)
+                        const audioContext = new (window.AudioContext || window.webkitAudioContext)({ 
                             sampleRate: 48000, 
                             latencyHint: 'interactive' 
                         });
                         
-                        const scriptProcessor = audioContext.createScriptProcessor(2048, 0, 2);
+                        // ... остальной код создания audio context и hybrid stream ...
                         
-                        // RingBuffer класс
-                        class RingBuffer {
-                            constructor(size) {
-                                this.buffer = new Float32Array(size);
-                                this.writeIndex = 0;
-                                this.readIndex = 0;
-                                this.availableSamples = 0;
-                                this.size = size;
-                            }
-                            write(data) {
-                                for (let i = 0; i < data.length; i++) {
-                                    this.buffer[this.writeIndex] = data[i];
-                                    this.writeIndex = (this.writeIndex + 1) % this.size;
-                                    this.availableSamples = Math.min(this.availableSamples + 1, this.size);
-                                }
-                            }
-                            read(output) {
-                                const samplesToRead = Math.min(output.length, this.availableSamples);
-                                for (let i = 0; i < samplesToRead; i++) {
-                                    output[i] = this.buffer[this.readIndex];
-                                    this.readIndex = (this.readIndex + 1) % this.size;
-                                }
-                                for (let i = samplesToRead; i < output.length; i++) {
-                                    output[i] = 0;
-                                }
-                                this.availableSamples = Math.max(0, this.availableSamples - samplesToRead);
-                                return samplesToRead;
-                            }
-                        }
-                        
-                        const leftRingBuffer = new RingBuffer(48000);
-                        const rightRingBuffer = new RingBuffer(48000);
-                        
-                        scriptProcessor.onaudioprocess = (event) => {
-                            if (!window.isNativeActive) {
-                                event.outputBuffer.getChannelData(0).fill(0);
-                                event.outputBuffer.getChannelData(1).fill(0);
-                                return;
-                            }
-                            leftRingBuffer.read(event.outputBuffer.getChannelData(0));
-                            rightRingBuffer.read(event.outputBuffer.getChannelData(1));
-                        };
-                        
-                        const destination = audioContext.createMediaStreamDestination();
-                        scriptProcessor.connect(destination);
-                        
-                        // 3. СОЗДАЕМ ГИБРИДНЫЙ ПОТОК
+                        // В конце, когда создаем hybrid stream:
                         const hybridStream = new MediaStream();
-                        
-                        // Добавляем видео
                         hybridStream.addTrack(videoTrack);
-                        console.log('[STREAM-ELECTRON] Added video track');
                         
-                        // Добавляем аудио
-                        if (destination.stream.getAudioTracks().length > 0) {
-                            hybridStream.addTrack(destination.stream.getAudioTracks()[0]);
-                            console.log('[STREAM-ELECTRON] Added audio track');
-                        }
+                        // Добавляем гибридный stream в трекер
+                        window.__allMediaStreams.set(hybridStream.id, hybridStream);
                         
-                        // 4. Сохраняем все в window
-                        window.jitsiNativeMediaStream = hybridStream;
-                        window.leftRingBuffer = leftRingBuffer;
-                        window.rightRingBuffer = rightRingBuffer;
-                        window.nativeAudioContext = audioContext;
-                        window.isNativeActive = true;
-                        window.isHybridMode = true;
-                        window.audioCounter = 0;
-                        window.currentVideoQuality = '${qualitySettings.name}';
+                        // ... остальной код ...
                         
-                        // Resume audio context
-                        if (audioContext.state === 'suspended') {
-                            await audioContext.resume();
-                        }
-                        
-                        console.log('[STREAM-ELECTRON] ✅ Hybrid stream ready with ${qualitySettings.name} quality!');
+                        console.log('[STREAM-ELECTRON] ✅ Hybrid stream ready!');
+                        console.log('[STREAM-ELECTRON] All tracked streams:', Array.from(window.__allMediaStreams.keys()));
                         
                         return {
                             success: true,
                             streamId: hybridStream.id,
+                            videoStreamId: videoStream.id,
                             videoQuality: actualSettings.width + 'x' + actualSettings.height + '@' + Math.round(actualSettings.frameRate) + 'fps',
                             qualityPreset: '${qualitySettings.name}'
                         };
                         
                     } catch (error) {
                         console.error('[STREAM-ELECTRON] Error:', error);
+                        stopAllKnownStreams();
                         return { success: false, error: error.message };
                     }
                 })();
             `);
+
+            const result = await Promise.race([createPromise, timeoutPromise]);
             
             if (result.success) {
+                // ВАЖНО: Очищаем старый трекер перед добавлением новых
+                this.activeMediaStreams.clear();
+                
+                // Добавляем новые stream IDs в трекер
+                this.activeMediaStreams.add(result.streamId);
+                if (result.videoStreamId) {
+                    this.activeMediaStreams.add(result.videoStreamId);
+                }
+                
                 log.info(`[STREAM-ELECTRON] <<< createHybridStreamInJitsi SUCCESS`);
-                log.info(`[STREAM-ELECTRON] Quality preset: ${result.qualityPreset}`);
-                log.info(`[STREAM-ELECTRON] Actual quality: ${result.videoQuality}`);
+                log.info(`[STREAM-ELECTRON] Tracking streams: ${Array.from(this.activeMediaStreams).join(', ')}`);
             } else {
                 log.error(`[STREAM-ELECTRON] <<< createHybridStreamInJitsi FAILED: ${result.error}`);
             }
@@ -2054,321 +2142,305 @@ export class JitsiManager {
     private getScreenShareInterceptorCode(): string {
         return `
             (function() {
-            console.log('[JitsiManager] Installing screen share interceptor...');
-            
-            let isIntercepted = false;
-            let pendingSourcesCallback = null;
-            
-            // Ждем загрузки Jitsi API
-            function waitForJitsiAPI() {
-                return new Promise((resolve) => {
-                let attempts = 0;
-                const checkInterval = setInterval(() => {
-                    attempts++;
-                    
-                    // Проверяем наличие JitsiMeetScreenObtainer
-                    if (window.JitsiMeetScreenObtainer && 
-                        typeof window.JitsiMeetScreenObtainer.openDesktopPicker === 'function') {
-                    clearInterval(checkInterval);
-                    console.log('[JitsiManager] JitsiMeetScreenObtainer found after', attempts, 'attempts');
-                    resolve(true);
-                    } else if (attempts > 100) { // Увеличиваем количество попыток
-                    clearInterval(checkInterval);
-                    console.error('[JitsiManager] JitsiMeetScreenObtainer not found');
-                    resolve(false);
-                    }
-                }, 100);
-                });
-            }
-            
-            waitForJitsiAPI().then(ready => {
-                if (!ready) {
-                console.error('[JitsiManager] Failed to find Jitsi API');
-                return;
-                }
+                console.log('[JitsiManager] Installing screen share picker interceptor...');
                 
-                // Сохраняем оригинальный метод
-                const originalOpenDesktopPicker = window.JitsiMeetScreenObtainer.openDesktopPicker;
-                console.log('[JitsiManager] Original openDesktopPicker saved');
-                
-                // Перехватываем openDesktopPicker
-                window.JitsiMeetScreenObtainer.openDesktopPicker = function(options, callback) {
-                console.log('[JitsiManager] ✅ Desktop picker INTERCEPTED!', options);
-                
-                if (isIntercepted) {
-                    console.log('[JitsiManager] Already processing, skipping...');
-                    return;
-                }
-                
-                isIntercepted = true;
-                pendingSourcesCallback = callback;
-                
-                // Запрашиваем источники через IPC
-                if (window.ipcRenderer) {
-                    console.log('[JitsiManager] Requesting sources via IPC...');
-                    
-                    window.ipcRenderer.invoke('get-desktop-sources').then(sources => {
-                    console.log('[JitsiManager] Got', sources.length, 'sources from main process');
-                    isIntercepted = false;
-                    
-                    if (sources && sources.length > 0) {
-                        // Показываем диалог выбора источника
-                        showSourcePicker(sources, (selectedId) => {
-                        console.log('[JitsiManager] User selected source:', selectedId);
-                        
-                        const selectedSource = sources.find(s => s.id === selectedId);
-                        
-                        // Проверяем, это native источник?
-                        if (selectedSource && selectedSource.isNative) {
-                            console.log('[JitsiManager] 🎯 NATIVE source selected, starting native stream...');
-                            
-                            // Запускаем native stream
-                            startNativeStreamForSource(selectedId, callback);
-                        } else {
-                            console.log('[JitsiManager] Standard source selected');
-                            // Для обычных источников используем стандартный механизм
-                            if (callback) {
-                            callback(selectedId, { audio: true });
-                            }
-                        }
-                        });
-                    } else {
-                        console.error('[JitsiManager] No sources received');
-                        isIntercepted = false;
-                        // Fallback на оригинальный метод
-                        originalOpenDesktopPicker.call(this, options, callback);
-                    }
-                    }).catch(error => {
-                    console.error('[JitsiManager] Error getting sources:', error);
-                    isIntercepted = false;
-                    originalOpenDesktopPicker.call(this, options, callback);
-                    });
-                } else {
-                    console.error('[JitsiManager] ipcRenderer not available');
-                    isIntercepted = false;
-                    originalOpenDesktopPicker.call(this, options, callback);
-                }
+                // Глобальные переменные для контроля состояния
+                window.__desktopPickerState = {
+                    isProcessing: false,
+                    lastProcessTime: 0,
+                    currentStreamId: null,
+                    debounceTimer: null
                 };
                 
-                console.log('[JitsiManager] ✅ Screen share interceptor installed successfully');
-            });
-            
-            // Функция для запуска native stream
-            async function startNativeStreamForSource(sourceId, callback) {
-                console.log('[JitsiManager] Starting native stream for source:', sourceId);
-                
-                try {
-                    // ВАЖНО: Передаем sourceId в main процесс для сохранения
-                    await window.ipcRenderer.invoke('jitsi:save-selected-source', sourceId);
+                // ===== ФУНКЦИЯ ПОКАЗА ДИАЛОГА ВЫБОРА ИСТОЧНИКОВ =====
+                function showSourcePicker(sources, callback) {
+                    // Удаляем предыдущий диалог если есть
+                    const existing = document.getElementById('source-picker-overlay');
+                    if (existing) existing.remove();
                     
-                    // Создаем native stream с захватом
-                    const result = await window.ipcRenderer.invoke('create-native-stream-for-jitsi');
+                    const overlay = document.createElement('div');
+                    overlay.id = 'source-picker-overlay';
+                    overlay.style.cssText = \`
+                        position: fixed;
+                        top: 0;
+                        left: 0;
+                        right: 0;
+                        bottom: 0;
+                        background: rgba(0, 0, 0, 0.85);
+                        z-index: 10000;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        backdrop-filter: blur(5px);
+                    \`;
                     
-                    if (result.success) {
-                        console.log('[JitsiManager] Native stream created successfully');
-                        
-                        // Вызываем callback чтобы закрыть диалог
-                        if (callback) {
-                            callback(sourceId, { audio: true, screenShareAudio: true });
-                        }
-                        
-                        // Ждем и запускаем демонстрацию
-                        setTimeout(async () => {
-                            console.log('[JitsiManager] Starting screen share...');
-                            
-                            // Метод 1: Redux dispatch
-                            if (window.APP && window.APP.store) {
-                                try {
-                                    const state = window.APP.store.getState();
-                                    const isSharing = state['features/base/tracks']?.some(
-                                        track => track.videoType === 'desktop' && track.local
-                                    );
-                                    
-                                    if (!isSharing) {
-                                        window.APP.store.dispatch({
-                                            type: 'TOGGLE_SCREENSHARING'
-                                        });
-                                        console.log('[JitsiManager] Dispatched TOGGLE_SCREENSHARING');
-                                    }
-                                } catch (e) {
-                                    console.error('[JitsiManager] Redux dispatch failed:', e);
-                                }
-                            }
-                            
-                            // Метод 2: Прямой вызов createLocalTracks
-                            else if (window.JitsiMeetJS && window.JitsiMeetJS.createLocalTracks) {
-                                try {
-                                    console.log('[JitsiManager] Creating desktop track...');
-                                    const tracks = await window.JitsiMeetJS.createLocalTracks({ 
-                                        devices: ['desktop']
-                                    });
-                                    console.log('[JitsiManager] Desktop track created');
-                                } catch (e) {
-                                    console.error('[JitsiManager] createLocalTracks failed:', e);
-                                }
-                            }
-                        }, 1500);
-                        
-                    } else {
-                        console.error('[JitsiManager] Failed to create native stream:', result.error);
-                        if (callback) {
-                            callback(sourceId, { audio: true });
-                        }
-                    }
-                } catch (error) {
-                    console.error('[JitsiManager] Error:', error);
-                    if (callback) {
-                        callback(sourceId, { audio: true });
-                    }
-                }
-            }
-
-            
-            
-            // Функция показа диалога выбора источника
-            function showSourcePicker(sources, callback) {
-                console.log('[SourcePicker] Showing picker with', sources.length, 'sources');
-                
-                // Удаляем предыдущий диалог если есть
-                const existing = document.getElementById('source-picker-overlay');
-                if (existing) existing.remove();
-                
-                const overlay = document.createElement('div');
-                overlay.id = 'source-picker-overlay';
-                overlay.style.cssText = \`
-                position: fixed;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                background: rgba(0, 0, 0, 0.85);
-                z-index: 10000;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                backdrop-filter: blur(5px);
-                \`;
-                
-                const dialog = document.createElement('div');
-                dialog.style.cssText = \`
-                background: white;
-                border-radius: 16px;
-                padding: 32px;
-                max-width: 90%;
-                max-height: 80%;
-                overflow: auto;
-                min-width: 700px;
-                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-                \`;
-                
-                let htmlContent = \`
-                <h2 style="margin-top: 0; color: #333; font-size: 24px;">
-                    Выберите экран или окно для демонстрации
-                </h2>
-                <div style="
-                    display: grid; 
-                    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); 
-                    gap: 20px; 
-                    margin: 24px 0;
-                ">
-                \`;
-                
-                sources.forEach((source, index) => {
-                const isNative = source.isNative || false;
-                const borderColor = isNative ? '#4CAF50' : '#2196F3';
-                
-                htmlContent += \`
-                    <div class="source-item" data-source-id="\${source.id}" style="
-                    border: 3px solid #e0e0e0;
-                    border-radius: 12px;
-                    padding: 16px;
-                    cursor: pointer;
-                    text-align: center;
-                    background: white;
-                    position: relative;
-                    transition: all 0.3s;
-                    " onmouseover="this.style.borderColor='\${borderColor}'; this.style.transform='scale(1.05)';" 
-                    onmouseout="this.style.borderColor='#e0e0e0'; this.style.transform='scale(1)';">
-                    \${isNative ? \`
+                    const dialog = document.createElement('div');
+                    dialog.style.cssText = \`
+                        background: white;
+                        border-radius: 16px;
+                        padding: 32px;
+                        max-width: 90%;
+                        max-height: 80%;
+                        overflow: auto;
+                        min-width: 700px;
+                        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+                    \`;
+                    
+                    let htmlContent = \`
+                        <h2 style="margin-top: 0; color: #333; font-size: 24px;">
+                            Выберите экран или окно для демонстрации
+                        </h2>
                         <div style="
-                        position: absolute;
-                        top: 10px;
-                        right: 10px;
-                        background: #4CAF50;
-                        color: white;
-                        padding: 4px 8px;
-                        border-radius: 6px;
-                        font-size: 12px;
-                        font-weight: bold;
-                        ">NATIVE</div>
-                    \` : ''}
-                    <img src="\${source.thumbnail?.dataUrl || ''}" style="
-                        width: 100%; 
-                        height: 160px; 
-                        object-fit: contain; 
-                        margin-bottom: 12px;
-                        border-radius: 8px;
-                        background: #f5f5f5;
-                    ">
-                    <div style="
-                        font-size: 14px; 
-                        color: #666; 
-                        word-wrap: break-word;
-                        font-weight: 500;
-                    ">\${source.name || 'Unknown'}</div>
-                    </div>
-                \`;
+                            display: grid; 
+                            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); 
+                            gap: 20px; 
+                            margin: 24px 0;
+                        ">
+                    \`;
+                    
+                    sources.forEach((source, index) => {
+                        const isNative = source.isNative || false;
+                        const borderColor = isNative ? '#4CAF50' : '#2196F3';
+                        
+                        htmlContent += \`
+                            <div class="source-item" data-source-id="\${source.id}" style="
+                                border: 3px solid #e0e0e0;
+                                border-radius: 12px;
+                                padding: 16px;
+                                cursor: pointer;
+                                text-align: center;
+                                background: white;
+                                position: relative;
+                                transition: all 0.3s;
+                            " onmouseover="this.style.borderColor='\${borderColor}'; this.style.transform='scale(1.05)';" 
+                            onmouseout="this.style.borderColor='#e0e0e0'; this.style.transform='scale(1)';">
+                                \${isNative ? \`
+                                    <div style="
+                                        position: absolute;
+                                        top: 10px;
+                                        right: 10px;
+                                        background: #4CAF50;
+                                        color: white;
+                                        padding: 4px 8px;
+                                        border-radius: 6px;
+                                        font-size: 12px;
+                                        font-weight: bold;
+                                    ">NATIVE</div>
+                                \` : ''}
+                                <img src="\${source.thumbnail?.dataUrl || ''}" style="
+                                    width: 100%; 
+                                    height: 160px; 
+                                    object-fit: contain; 
+                                    margin-bottom: 12px;
+                                    border-radius: 8px;
+                                    background: #f5f5f5;
+                                ">
+                                <div style="
+                                    font-size: 14px; 
+                                    color: #666; 
+                                    word-wrap: break-word;
+                                    font-weight: 500;
+                                ">\${source.name || 'Unknown'}</div>
+                            </div>
+                        \`;
+                    });
+                    
+                    htmlContent += \`
+                        </div>
+                        <div style="text-align: center; margin-top: 24px;">
+                            <button id="cancel-picker-btn" style="
+                                background: #f44336;
+                                color: white;
+                                border: none;
+                                padding: 12px 32px;
+                                border-radius: 8px;
+                                cursor: pointer;
+                                font-size: 16px;
+                                font-weight: 500;
+                            ">Отмена</button>
+                        </div>
+                    \`;
+                    
+                    dialog.innerHTML = htmlContent;
+                    overlay.appendChild(dialog);
+                    document.body.appendChild(overlay);
+                    
+                    // Обработчики кликов
+                    overlay.onclick = function(e) {
+                        e.stopPropagation();
+                        
+                        const sourceItem = e.target.closest('.source-item');
+                        if (sourceItem) {
+                            const sourceId = sourceItem.dataset.sourceId;
+                            overlay.remove();
+                            callback(sourceId);
+                            return;
+                        }
+                        
+                        if (e.target.id === 'cancel-picker-btn' || e.target === overlay) {
+                            overlay.remove();
+                            callback(null);
+                            return;
+                        }
+                    };
+                    
+                    // Escape для закрытия
+                    const handleEscape = function(e) {
+                        if (e.key === 'Escape') {
+                            overlay.remove();
+                            callback(null);
+                            document.removeEventListener('keydown', handleEscape);
+                        }
+                    };
+                    document.addEventListener('keydown', handleEscape);
+                }
+                
+                // ===== ОЖИДАНИЕ JITSI API =====
+                function waitForJitsiAPI() {
+                    return new Promise((resolve) => {
+                        let attempts = 0;
+                        const checkInterval = setInterval(() => {
+                            attempts++;
+                            if (window.JitsiMeetScreenObtainer && 
+                                typeof window.JitsiMeetScreenObtainer.openDesktopPicker === 'function') {
+                                clearInterval(checkInterval);
+                                resolve(true);
+                            } else if (attempts > 100) {
+                                clearInterval(checkInterval);
+                                resolve(false);
+                            }
+                        }, 100);
+                    });
+                }
+                
+                // ===== ОСНОВНАЯ ЛОГИКА ПЕРЕХВАТА =====
+                waitForJitsiAPI().then(ready => {
+                    if (!ready) {
+                        console.log('[JitsiManager] JitsiMeetScreenObtainer not found');
+                        return;
+                    }
+                    
+                    const originalOpenDesktopPicker = window.JitsiMeetScreenObtainer.openDesktopPicker;
+                    const pickerState = window.__desktopPickerState;
+                    
+                    window.JitsiMeetScreenObtainer.openDesktopPicker = async function(options, callback) {
+                        console.log('[JitsiManager] Desktop picker intercepted');
+                        
+                        // Проверка на дебаунс (игнорируем повторные вызовы в течение 2 секунд)
+                        const now = Date.now();
+                        if (now - pickerState.lastProcessTime < 2000) {
+                            console.log('[JitsiManager] Ignoring duplicate call (debounce)');
+                            if (callback) {
+                                setTimeout(() => callback(null, { audio: false }), 100);
+                            }
+                            return;
+                        }
+                        
+                        // Проверка на обработку
+                        if (pickerState.isProcessing) {
+                            console.log('[JitsiManager] Already processing, ignoring...');
+                            if (callback) {
+                                setTimeout(() => callback(null, { audio: false }), 100);
+                            }
+                            return;
+                        }
+                        
+                        // Проверка на активный stream
+                        if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                            console.log('[JitsiManager] Native stream already active, returning it');
+                            if (callback) {
+                                // Возвращаем текущий активный stream
+                                callback('native-active', { audio: true, screenShareAudio: true });
+                            }
+                            return;
+                        }
+                        
+                        pickerState.isProcessing = true;
+                        pickerState.lastProcessTime = now;
+                        
+                        try {
+                            // Запрашиваем источники через IPC
+                            if (window.ipcRenderer) {
+                                console.log('[JitsiManager] Requesting desktop sources...');
+                                const sources = await window.ipcRenderer.invoke('get-desktop-sources');
+                                console.log('[JitsiManager] Got', sources.length, 'sources');
+                                
+                                if (sources && sources.length > 0) {
+                                    // Показываем диалог выбора
+                                    showSourcePicker(sources, async (selectedId) => {
+                                        console.log('[JitsiManager] Selected source:', selectedId);
+                                        
+                                        if (!selectedId) {
+                                            pickerState.isProcessing = false;
+                                            if (callback) callback(null, { audio: false });
+                                            return;
+                                        }
+                                        
+                                        const selectedSource = sources.find(s => s.id === selectedId);
+                                        
+                                        if (selectedSource && selectedSource.isNative) {
+                                            console.log('[JitsiManager] Native source selected');
+                                            
+                                            // Проверяем, не активен ли уже stream
+                                            if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                                                console.log('[JitsiManager] Native stream already exists, reusing');
+                                                pickerState.isProcessing = false;
+                                                if (callback) {
+                                                    callback(selectedId, { audio: true, screenShareAudio: true });
+                                                }
+                                                return;
+                                            }
+                                            
+                                            // Сохраняем выбранный источник
+                                            await window.ipcRenderer.invoke('jitsi:save-selected-source', selectedId);
+                                            
+                                            // Создаем native stream только если его нет
+                                            console.log('[JitsiManager] Creating new native stream...');
+                                            const result = await window.ipcRenderer.invoke('create-native-stream-for-jitsi');
+                                            
+                                            if (result.success) {
+                                                console.log('[JitsiManager] Native stream created successfully');
+                                                pickerState.currentStreamId = result.streamId;
+                                                if (callback) {
+                                                    callback(selectedId, { audio: true, screenShareAudio: true });
+                                                }
+                                            } else {
+                                                console.error('[JitsiManager] Failed to create native stream:', result.error);
+                                                if (callback) {
+                                                    callback(null, { audio: false });
+                                                }
+                                            }
+                                        } else {
+                                            console.log('[JitsiManager] Regular Electron source selected');
+                                            // Обычный источник Electron
+                                            if (callback) {
+                                                callback(selectedId, { audio: true });
+                                            }
+                                        }
+                                        
+                                        pickerState.isProcessing = false;
+                                    });
+                                } else {
+                                    console.log('[JitsiManager] No sources available, falling back to original');
+                                    pickerState.isProcessing = false;
+                                    originalOpenDesktopPicker.call(this, options, callback);
+                                }
+                            } else {
+                                console.log('[JitsiManager] No IPC renderer, falling back to original');
+                                pickerState.isProcessing = false;
+                                originalOpenDesktopPicker.call(this, options, callback);
+                            }
+                        } catch (error) {
+                            console.error('[JitsiManager] Error in desktop picker:', error);
+                            pickerState.isProcessing = false;
+                            if (callback) callback(null, { audio: false });
+                        }
+                    };
+                    
+                    console.log('[JitsiManager] ✅ Screen share picker interceptor installed');
                 });
                 
-                htmlContent += \`
-                </div>
-                <div style="text-align: center; margin-top: 24px;">
-                    <button id="cancel-picker-btn" style="
-                    background: #f44336;
-                    color: white;
-                    border: none;
-                    padding: 12px 32px;
-                    border-radius: 8px;
-                    cursor: pointer;
-                    font-size: 16px;
-                    font-weight: 500;
-                    ">Отмена</button>
-                </div>
-                \`;
-                
-                dialog.innerHTML = htmlContent;
-                overlay.appendChild(dialog);
-                document.body.appendChild(overlay);
-                
-                // Обработчики кликов
-                overlay.onclick = function(e) {
-                e.stopPropagation();
-                
-                const sourceItem = e.target.closest('.source-item');
-                if (sourceItem) {
-                    const sourceId = sourceItem.dataset.sourceId;
-                    overlay.remove();
-                    callback(sourceId);
-                    return;
-                }
-                
-                if (e.target.id === 'cancel-picker-btn' || e.target === overlay) {
-                    overlay.remove();
-                    return;
-                }
-                };
-                
-                // Escape для закрытия
-                const handleEscape = function(e) {
-                if (e.key === 'Escape') {
-                    overlay.remove();
-                    document.removeEventListener('keydown', handleEscape);
-                }
-                };
-                document.addEventListener('keydown', handleEscape);
-            }
-            
-            return { success: true };
+                return { success: true };
             })();
         `;
     }
@@ -2517,9 +2589,522 @@ export class JitsiManager {
         }
     }
 
-    private createTestPattern(width: number, height: number, frameNum: number): string {
-        // Этот метод больше не используется, паттерн создается прямо в Jitsi
-        return "";
+    private async forceReleaseDesktopCapture(): Promise<void> {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
+        
+        try {
+            // Принудительно освобождаем ресурсы через перезагрузку части контекста
+            await this.state.window.webContents.executeJavaScript(`
+                (async function() {
+                    console.log('[STREAM-ELECTRON] Force releasing desktop capture...');
+                    
+                    // Метод 1: Переопределяем getUserMedia временно
+                    const originalGetUserMedia = navigator.mediaDevices.getUserMedia;
+                    navigator.mediaDevices.getUserMedia = async function(constraints) {
+                        // Если запрашивается desktop, возвращаем пустой stream
+                        if (constraints?.video?.mandatory?.chromeMediaSource === 'desktop') {
+                            console.log('[STREAM-ELECTRON] Blocking desktop capture request');
+                            throw new Error('Desktop capture blocked for cleanup');
+                        }
+                        return originalGetUserMedia.call(this, constraints);
+                    };
+                    
+                    // Ждем немного
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    
+                    // Восстанавливаем оригинальную функцию
+                    navigator.mediaDevices.getUserMedia = originalGetUserMedia;
+                    
+                    // Метод 2: Принудительный сброс через создание и удаление фейкового stream
+                    try {
+                        // Создаем минимальный audio stream чтобы "сбросить" состояние
+                        const dummyStream = await navigator.mediaDevices.getUserMedia({ 
+                            audio: { 
+                                echoCancellation: false,
+                                noiseSuppression: false,
+                                autoGainControl: false
+                            }, 
+                            video: false 
+                        });
+                        
+                        // Сразу останавливаем его
+                        dummyStream.getTracks().forEach(track => track.stop());
+                        console.log('[STREAM-ELECTRON] Dummy stream created and stopped');
+                    } catch (e) {
+                        console.log('[STREAM-ELECTRON] Could not create dummy stream:', e.message);
+                    }
+                    
+                    // Метод 3: Сброс через garbage collection hint
+                    if (typeof gc !== 'undefined') {
+                        gc();
+                        console.log('[STREAM-ELECTRON] Manual GC triggered');
+                    }
+                    
+                    return true;
+                })();
+            `);
+        } catch (error: any) {
+            log.error(`[STREAM-ELECTRON] Force release error: ${error.message}`);
+        }
+    }
+
+    private async stopAllDesktopTracks(): Promise<number> {
+        if (!this.state.window || this.state.window.isDestroyed()) return 0;
+        
+        try {
+            const stoppedCount = await this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    console.log('[STREAM-ELECTRON] Searching for ALL desktop tracks...');
+                    let stoppedCount = 0;
+                    
+                    // Хак: получаем все MediaStreamTrack через прототип
+                    if (typeof MediaStreamTrack !== 'undefined') {
+                        // Переопределяем метод stop для логирования
+                        const originalStop = MediaStreamTrack.prototype.stop;
+                        
+                        // Находим все tracks через getSettings
+                        const allTracks = [];
+                        
+                        // Проверяем все существующие MediaStream объекты
+                        // Способ 1: через window объекты
+                        for (let key in window) {
+                            try {
+                                if (window[key] instanceof MediaStream) {
+                                    console.log('[STREAM-ELECTRON] Found MediaStream in window.' + key);
+                                    window[key].getTracks().forEach(track => {
+                                        allTracks.push({track, source: 'window.' + key});
+                                    });
+                                }
+                            } catch (e) {}
+                        }
+                        
+                        // Способ 2: через video элементы
+                        document.querySelectorAll('video').forEach((video, idx) => {
+                            if (video.srcObject instanceof MediaStream) {
+                                video.srcObject.getTracks().forEach(track => {
+                                    allTracks.push({track, source: 'video[' + idx + ']'});
+                                });
+                            }
+                        });
+                        
+                        // Способ 3: через audio элементы  
+                        document.querySelectorAll('audio').forEach((audio, idx) => {
+                            if (audio.srcObject instanceof MediaStream) {
+                                audio.srcObject.getTracks().forEach(track => {
+                                    allTracks.push({track, source: 'audio[' + idx + ']'});
+                                });
+                            }
+                        });
+                        
+                        // Проверяем и останавливаем desktop tracks
+                        allTracks.forEach(({track, source}) => {
+                            try {
+                                const settings = track.getSettings ? track.getSettings() : {};
+                                const constraints = track.getConstraints ? track.getConstraints() : {};
+                                
+                                // Проверяем, является ли это desktop track
+                                const isDesktop = 
+                                    (track.label && track.label.toLowerCase().includes('screen')) ||
+                                    (track.label && track.label.toLowerCase().includes('window')) ||
+                                    (settings.displaySurface) ||
+                                    (constraints.video && constraints.video.mandatory && 
+                                    constraints.video.mandatory.chromeMediaSource === 'desktop');
+                                
+                                if (isDesktop && track.readyState === 'live') {
+                                    console.log('[STREAM-ELECTRON] Found desktop track:', {
+                                        id: track.id,
+                                        label: track.label,
+                                        kind: track.kind,
+                                        source: source,
+                                        settings: settings
+                                    });
+                                    
+                                    track.stop();
+                                    stoppedCount++;
+                                    console.log('[STREAM-ELECTRON] Stopped desktop track:', track.id);
+                                }
+                            } catch (e) {
+                                console.error('[STREAM-ELECTRON] Error checking track:', e);
+                            }
+                        });
+                    }
+                    
+                    console.log('[STREAM-ELECTRON] Total desktop tracks stopped:', stoppedCount);
+                    return stoppedCount;
+                })();
+            `);
+            
+            log.info(`[STREAM-ELECTRON] Stopped ${stoppedCount} desktop tracks`);
+            return stoppedCount;
+            
+        } catch (error: any) {
+            log.error(`[STREAM-ELECTRON] Error stopping desktop tracks: ${error.message}`);
+            return 0;
+        }
+    }
+
+    private async forceStopElectronCapture(): Promise<void> {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
+        
+        try {
+            // Используем Electron API для остановки всех медиа доступов
+            const { session } = this.state.window.webContents;
+            
+            // Метод 1: Очищаем разрешения на медиа
+            await session.clearStorageData({
+                storages: ['cachestorage', 'websql', 'indexdb'],
+                quotas: ['temporary', 'persistent', 'syncable']
+            });
+            
+            // Метод 2: Сбрасываем разрешения для getUserMedia
+            await session.setPermissionRequestHandler(null);
+            
+            // Метод 3: Принудительно останавливаем все медиа потоки через DevTools Protocol
+            try {
+                await this.state.window.webContents.debugger.attach('1.3');
+                
+                // Останавливаем все медиа потоки
+                await this.state.window.webContents.debugger.sendCommand('Page.stopScreencast');
+                
+                // Отключаем debugger
+                await this.state.window.webContents.debugger.detach();
+            } catch (debuggerError) {
+                log.warn(`[STREAM-ELECTRON] Debugger method failed: ${debuggerError}`);
+            }
+            
+            log.info("[STREAM-ELECTRON] Forced Electron capture stop");
+            
+        } catch (error: any) {
+            log.error(`[STREAM-ELECTRON] Error forcing stop: ${error.message}`);
+        }
+    }
+
+    // Добавьте этот диагностический метод в JitsiManager
+    private async diagnoseJitsiState(): Promise<any> {
+        if (!this.state.window || this.state.window.isDestroyed()) return null;
+        
+        try {
+            const state = await this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    const state = {
+                        hasConference: !!window.APP?.conference,
+                        isDesktopSharingEnabled: window.APP?.conference?.isDesktopSharingEnabled?.() || false,
+                        localTracks: [],
+                        roomTracks: [],
+                        mediaStreams: [],
+                        videoElements: []
+                    };
+                    
+                    // Проверяем локальные треки конференции
+                    if (window.APP?.conference?.getLocalTracks) {
+                        const tracks = window.APP.conference.getLocalTracks();
+                        state.localTracks = tracks.map(t => ({
+                            id: t.track?.id,
+                            type: t.getType?.(),
+                            videoType: t.getVideoType?.(),
+                            muted: t.isMuted?.(),
+                            disposed: t.disposed
+                        }));
+                    }
+                    
+                    // Проверяем треки в room
+                    if (window.APP?.conference?.room) {
+                        const roomTracks = window.APP.conference.room.getLocalTracks?.() || [];
+                        state.roomTracks = roomTracks.map(t => ({
+                            id: t.track?.id,
+                            type: t.getType?.(),
+                            videoType: t.getVideoType?.(),
+                            disposed: t.disposed
+                        }));
+                    }
+                    
+                    // Проверяем все MediaStream объекты
+                    for (let key in window) {
+                        try {
+                            if (window[key] instanceof MediaStream) {
+                                state.mediaStreams.push({
+                                    key: key,
+                                    id: window[key].id,
+                                    active: window[key].active,
+                                    tracks: window[key].getTracks().map(t => ({
+                                        id: t.id,
+                                        kind: t.kind,
+                                        label: t.label,
+                                        readyState: t.readyState
+                                    }))
+                                });
+                            }
+                        } catch (e) {}
+                    }
+                    
+                    // Проверяем video элементы
+                    document.querySelectorAll('video').forEach((video, idx) => {
+                        if (video.srcObject) {
+                            state.videoElements.push({
+                                index: idx,
+                                streamId: video.srcObject.id,
+                                active: video.srcObject.active,
+                                tracks: video.srcObject.getTracks().length
+                            });
+                        }
+                    });
+                    
+                    return state;
+                })();
+            `);
+            
+            return state;
+            
+        } catch (error: any) {
+            log.error(`[STREAM-ELECTRON] Diagnose error: ${error.message}`);
+            return null;
+        }
+    }
+
+    private async diagnoseDesktopTracks(): Promise<any> {
+        if (!this.state.window || this.state.window.isDestroyed()) return null;
+        
+        try {
+            const result = await this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    const diagnosis = {
+                        electronVideoStream: null,
+                        jitsiNativeMediaStream: null,
+                        jitsiConferenceTracks: [],
+                        videoElements: [],
+                        totalLiveTracks: 0
+                    };
+                    
+                    // 1. Проверяем window.electronVideoStream
+                    if (window.electronVideoStream) {
+                        const tracks = window.electronVideoStream.getTracks();
+                        diagnosis.electronVideoStream = {
+                            exists: true,
+                            tracksCount: tracks.length,
+                            tracks: tracks.map(t => ({
+                                id: t.id.substring(0, 8) + '...',
+                                kind: t.kind,
+                                state: t.readyState
+                            }))
+                        };
+                        tracks.forEach(t => {
+                            if (t.readyState === 'live') diagnosis.totalLiveTracks++;
+                        });
+                    }
+                    
+                    // 2. Проверяем window.jitsiNativeMediaStream
+                    if (window.jitsiNativeMediaStream) {
+                        const tracks = window.jitsiNativeMediaStream.getTracks();
+                        diagnosis.jitsiNativeMediaStream = {
+                            exists: true,
+                            tracksCount: tracks.length,
+                            tracks: tracks.map(t => ({
+                                id: t.id.substring(0, 8) + '...',
+                                kind: t.kind,
+                                state: t.readyState
+                            }))
+                        };
+                        tracks.forEach(t => {
+                            if (t.readyState === 'live') diagnosis.totalLiveTracks++;
+                        });
+                    }
+                    
+                    // 3. Проверяем Jitsi conference tracks
+                    if (window.APP?.conference) {
+                        const localTracks = window.APP.conference.getLocalTracks?.() || [];
+                        diagnosis.jitsiConferenceTracks = localTracks.map(jitsiTrack => ({
+                            videoType: jitsiTrack.getVideoType?.(),
+                            disposed: jitsiTrack.disposed,
+                            trackId: jitsiTrack.track?.id?.substring(0, 8) + '...',
+                            trackState: jitsiTrack.track?.readyState
+                        }));
+                        
+                        localTracks.forEach(jitsiTrack => {
+                            if (jitsiTrack.getVideoType?.() === 'desktop' && !jitsiTrack.disposed) {
+                                diagnosis.totalLiveTracks++;
+                            }
+                        });
+                    }
+                    
+                    // 4. Проверяем video элементы
+                    document.querySelectorAll('video').forEach((video, idx) => {
+                        if (video.srcObject && video.srcObject instanceof MediaStream) {
+                            const tracks = video.srcObject.getTracks();
+                            if (tracks.length > 0) {
+                                diagnosis.videoElements.push({
+                                    index: idx,
+                                    streamId: video.srcObject.id.substring(0, 8) + '...',
+                                    tracksCount: tracks.length,
+                                    liveTracks: tracks.filter(t => t.readyState === 'live').length
+                                });
+                                tracks.forEach(t => {
+                                    if (t.readyState === 'live' && t.kind === 'video') {
+                                        diagnosis.totalLiveTracks++;
+                                    }
+                                });
+                            }
+                        }
+                    });
+                    
+                    return diagnosis;
+                })();
+            `);
+            
+            log.info(`[STREAM-ELECTRON] DIAGNOSIS RESULT: ${JSON.stringify(result, null, 2)}`);
+            return result;
+            
+        } catch (error: any) {
+            log.error(`[STREAM-ELECTRON] Diagnose error: ${error.message}`);
+            return null;
+        }
+    }
+
+    private async nukeClearAllStreams(): Promise<void> {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
+        
+        try {
+            await this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    console.log('[NUKE] === NUCLEAR CLEANUP STARTING ===');
+                    
+                    // Сохраняем оригинальный getUserMedia
+                    const originalGetUserMedia = navigator.mediaDevices.getUserMedia;
+                    
+                    // Временно блокируем getUserMedia
+                    navigator.mediaDevices.getUserMedia = function() {
+                        throw new Error('getUserMedia blocked during cleanup');
+                    };
+                    
+                    try {
+                        // Находим ВСЕ MediaStream объекты
+                        const allStreams = [];
+                        
+                        // Через глобальные переменные
+                        for (let key in window) {
+                            try {
+                                if (window[key] instanceof MediaStream) {
+                                    allStreams.push(window[key]);
+                                    window[key] = null; // Обнуляем ссылку
+                                }
+                            } catch(e) {}
+                        }
+                        
+                        // Через video/audio элементы
+                        [...document.querySelectorAll('video'), ...document.querySelectorAll('audio')].forEach(el => {
+                            if (el.srcObject instanceof MediaStream) {
+                                allStreams.push(el.srcObject);
+                                el.srcObject = null; // Обнуляем srcObject
+                            }
+                        });
+                        
+                        // Останавливаем ВСЕ треки
+                        allStreams.forEach(stream => {
+                            stream.getTracks().forEach(track => {
+                                if (track.readyState === 'live') {
+                                    track.stop();
+                                    console.log('[NUKE] Stopped track:', track.id, track.kind);
+                                }
+                            });
+                        });
+                        
+                        // Очищаем Jitsi треки
+                        if (window.APP?.conference) {
+                            const tracks = window.APP.conference.getLocalTracks?.() || [];
+                            tracks.forEach(t => {
+                                if (t.dispose) t.dispose();
+                            });
+                            
+                            // Обнуляем внутренние ссылки Jitsi
+                            if (window.APP.conference._localTracks) {
+                                window.APP.conference._localTracks = [];
+                            }
+                            if (window.APP.conference.localVideo) {
+                                window.APP.conference.localVideo = null;
+                            }
+                            if (window.APP.conference.localDesktop) {
+                                window.APP.conference.localDesktop = null;
+                            }
+                        }
+                        
+                    } finally {
+                        // Восстанавливаем getUserMedia через небольшую задержку
+                        setTimeout(() => {
+                            navigator.mediaDevices.getUserMedia = originalGetUserMedia;
+                            console.log('[NUKE] getUserMedia restored');
+                        }, 100);
+                    }
+                    
+                    console.log('[NUKE] === NUCLEAR CLEANUP COMPLETED ===');
+                })();
+            `);
+        } catch (error: any) {
+            log.error(`[STREAM-ELECTRON] Nuke clear error: ${error.message}`);
+        }
+    }
+
+    private async forceReleaseAllMediaResources(): Promise<void> {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
+        
+        try {
+            // 1. Используем Chrome DevTools Protocol для принудительной остановки
+            const cdp = this.state.window.webContents.debugger;
+            
+            try {
+                if (!cdp.isAttached()) {
+                    await cdp.attach('1.3');
+                }
+                
+                // Останавливаем все медиа сессии
+                await cdp.sendCommand('Page.stopScreencast');
+                
+                // Отключаем медиа устройства
+                await cdp.sendCommand('Emulation.clearDeviceMetricsOverride');
+                
+                // Очищаем разрешения
+                await cdp.sendCommand('Browser.resetPermissions');
+                
+                await cdp.detach();
+            } catch (cdpError) {
+                log.warn(`[STREAM-ELECTRON] CDP cleanup error: ${cdpError}`);
+            }
+            
+            // 2. Принудительно вызываем Garbage Collection
+            await this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    // Принудительно освобождаем все ссылки
+                    if (typeof gc !== 'undefined') {
+                        gc();
+                        gc(); // Вызываем дважды для полной очистки
+                        console.log('[STREAM-ELECTRON] Manual GC triggered');
+                    }
+                    
+                    // Также пробуем через WeakRef если доступно
+                    if (typeof WeakRef !== 'undefined') {
+                        // Создаем слабую ссылку и сразу удаляем
+                        // Это может подтолкнуть GC к более агрессивной очистке
+                        let wr = new WeakRef({});
+                        wr = null;
+                    }
+                    
+                    return true;
+                })();
+            `);
+            
+            // 3. Сбрасываем медиа сессию
+            const session = this.state.window.webContents.session;
+            
+            // Очищаем медиа разрешения
+            await session.setPermissionCheckHandler(null);
+            await session.setPermissionRequestHandler(null);
+            
+            // 4. Принудительная очистка кеша медиа устройств
+            await session.clearCache();
+            
+            log.info("[STREAM-ELECTRON] Forced release of all media resources");
+            
+        } catch (error: any) {
+            log.error(`[STREAM-ELECTRON] Error releasing media resources: ${error.message}`);
+        }
     }
 }
 
