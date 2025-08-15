@@ -291,46 +291,6 @@ export class NativeCaptureManager {
         }
     }
 
-    private setupAudioOnlyCallbacks(): void {
-        if (!this.state.addon) return;
-        
-        log.info("[NATIVE-CAPTURE] Setting up AUDIO-ONLY callbacks (no video processing)");
-        
-        // Устанавливаем ТОЛЬКО аудио callback
-        this.state.addon.setWebRTCAudioCallback((audioData: any) => {
-            this.state.audioFrameCount++;
-            
-            if (this.state.audioFrameCount === 1) {
-                log.info("[NATIVE-CAPTURE] First audio frame in audio-only mode:", {
-                    hasData: !!audioData?.data,
-                    dataByteLength: audioData?.data?.byteLength,
-                    sampleRate: audioData?.sampleRate,
-                    channels: audioData?.channels,
-                    source: audioData?.source
-                });
-            }
-            
-            if (audioData && audioData.data && audioData.data.byteLength > 0) {
-                if (this.state.callbacks.audio) {
-                    this.state.callbacks.audio({
-                        data: audioData.data,
-                        sampleRate: audioData?.sampleRate || 48000,
-                        channels: audioData?.channels || 2,
-                        numSamples: audioData?.numSamples || 960,
-                        source: audioData?.source || 'unknown'
-                    });
-                }
-            }
-            
-            if (this.state.audioFrameCount % 100 === 0) {
-                log.info(`[NATIVE-CAPTURE] Audio-only: ${this.state.audioFrameCount} frames`);
-            }
-        });
-        
-        // НЕ устанавливаем video callback для экономии ресурсов!
-        log.info("[NATIVE-CAPTURE] ✅ Audio-only callbacks configured (video skipped for performance)");
-    }
-
     private loadAddon(): boolean {
       try {
         const possiblePaths = [
