@@ -12,6 +12,8 @@ interface JitsiOptions {
   email?: string;
   avatarUrl?: string;
   jwt?: string;
+  configOverwrite?: any;
+  interfaceConfigOverwrite?: any;
 }
 
 interface JitsiState {
@@ -148,7 +150,30 @@ export class JitsiManager {
         this.registerHandlers();
     }
 
+    public isReady(): boolean {
+        return this.nativeCapture !== null && this.bundlePath !== null;
+    }
+
+    public async waitForReady(timeout: number = 5000): Promise<boolean> {
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < timeout) {
+            if (this.isReady()) {
+                return true;
+            }
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        return false;
+    }
+
     private registerHandlers(): void {
+        ipcMain.handle("jitsi:conference-joined", async () => {
+            log.info("[JITSI-MANAGER] User joined conference");
+            this.wasInConference = true;
+            return { success: true };
+        });
+
         // Основной обработчик для создания окна
         ipcMain.handle("jitsi:create-window", async (event, options: JitsiOptions) => {
             return this.createWindow(options);
@@ -175,19 +200,30 @@ export class JitsiManager {
             return { success: true };
         });
 
-        // НОВЫЙ: Пользователь присоединился к конференции
-        ipcMain.handle("jitsi:conference-joined", async () => {
-            log.info("[JITSI-MANAGER] User joined conference");
-            this.wasInConference = true;
-            return { success: true };
-        });
 
-        // НОВЫЙ: Пользователь покинул конференцию
         ipcMain.handle("jitsi:conference-left", async (event, data) => {
-            log.info(`[JITSI-MANAGER] User left conference: ${data.reason}`);
-            if (this.wasInConference) {
-                await this.closeWindow();
+            log.info(`[JITSI-MANAGER] User left conference: ${data?.reason || 'unknown'}`);
+            
+            // Закрываем окно только если это финальное событие выхода
+            // Игнорируем промежуточные события (например, открытие меню)
+            const finalReasons = [
+                'videoConferenceLeft',
+                'conference_left_event', 
+                'conference_disconnected',
+                'kicked',
+                'connection_error',
+                'page_unload'
+            ];
+            
+            if (finalReasons.includes(data?.reason)) {
+                log.info(`[JITSI-MANAGER] Final leave event detected, closing window...`);
+                setTimeout(async () => {
+                    await this.closeWindow();
+                }, 500); // Небольшая задержка для корректного завершения всех процессов
+            } else {
+                log.info(`[JITSI-MANAGER] Non-final event, keeping window open`);
             }
+            
             return { success: true };
         });
 
@@ -267,9 +303,51 @@ export class JitsiManager {
             }
         });
     }
-
     
     async createWindow(options: JitsiOptions): Promise<{ success: boolean; error?: string }> {
+        try {
+            // Проверяем готовность
+            if (!this.isReady()) {
+                log.error("[JITSI-MANAGER] Manager not ready");
+                return { success: false, error: "JitsiManager not initialized" };
+            }
+            
+            // Закрываем предыдущее окно если есть
+            await this.closeWindow();
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Сбрасываем флаг
+            this.wasInConference = false;
+
+            const server = options.serverUrl || 'https://jitsi-connectrm.ru';
+            const roomName = options.roomName.replace(/[^a-zA-Z0-9-_]/g, '');
+            const displayName = options.displayName || 'Guest';
+
+            log.info(`[JITSI-MANAGER] Creating Jitsi window: ${server}/${roomName}`);
+
+            // Создаем окно с таймаутом
+            const windowCreationPromise = this.createWindowInternal(options);
+            const timeoutPromise = new Promise<{ success: boolean; error: string }>((resolve) => {
+                setTimeout(() => {
+                    resolve({ success: false, error: "Window creation timeout" });
+                }, 10000); // 10 секунд таймаут
+            });
+
+            const result = await Promise.race([windowCreationPromise, timeoutPromise]);
+            
+            if (!result.success) {
+                log.error(`[JITSI-MANAGER] Failed to create window: ${result.error}`);
+            }
+            
+            return result;
+
+        } catch (error: any) {
+            log.error(`[JITSI-MANAGER] Exception in createWindow: ${error.message}`);
+            return { success: false, error: error.message };
+        }
+    }
+
+    private async createWindowInternal(options: JitsiOptions): Promise<{ success: boolean; error?: string }> {
         try {
             // Закрываем предыдущее окно если есть
             await this.closeWindow();
@@ -353,6 +431,7 @@ export class JitsiManager {
         }
     }
 
+
     private buildConferenceUrl(server: string, roomName: string, options: JitsiOptions): string {
         let url = `${server}/${roomName}`;
 
@@ -363,14 +442,80 @@ export class JitsiManager {
             url += '?' + queryParams.toString();
         }
 
+        // Формируем параметры для hash
         const hashParams = new URLSearchParams();
+        
+        // Базовые настройки
         hashParams.append('config.prejoinPageEnabled', 'false');
         hashParams.append('config.startWithAudioMuted', 'false');
         hashParams.append('config.startWithVideoMuted', 'true');
         
+        // Применяем настройки из configOverwrite
+        if (options.configOverwrite) {
+            // Logging настройки
+            hashParams.append('config.apiLogLevels', JSON.stringify(['error']));
+            hashParams.append('config.logging.defaultLogLevel', 'error');
+            
+            // Audio настройки
+            hashParams.append('config.disableAudioLevels', 'false');
+            hashParams.append('config.stereo', 'false');
+            hashParams.append('config.echoCancellation', 'true');
+            hashParams.append('config.noiseSuppression', 'true');
+            hashParams.append('config.highpassFilter', 'true');
+            hashParams.append('config.autoGainControl', 'true');
+            hashParams.append('config.enableLipSync', 'false');
+            
+            // UI настройки
+            hashParams.append('config.hideConferenceSubject', 'true');
+            hashParams.append('config.disableSimulcast', 'true');
+            hashParams.append('config.deeplinking.disabled', 'true');
+            
+            // Модерация и права
+            hashParams.append('config.disableRemoteMute', 'true');
+            hashParams.append('config.disableKick', 'true');
+            hashParams.append('config.disableGrantModerator', 'true');
+            hashParams.append('config.disablePrivateChat', 'true');
+            hashParams.append('config.disableAVModeration', 'true');
+            hashParams.append('config.disableInviteFunctions', 'true');
+            
+            // Настройки видео
+            hashParams.append('config.resolution', '720');
+            hashParams.append('config.disableSelfViewSettings', 'true');
+            hashParams.append('config.disableLocalVideoFlip', 'true');
+            hashParams.append('config.disableLocalStats', 'true');
+            
+            // Filmstrip
+            hashParams.append('config.filmstrip.disableStageFilmstrip', 'true');
+            hashParams.append('config.filmstrip.disableResizable', 'true');
+            
+            // Participants pane
+            hashParams.append('config.participantsPane.hideMoreActionsButton', 'true');
+            
+            // Breakout rooms
+            hashParams.append('config.breakoutRooms.hideMoreActionsButton', 'true');
+        }
+        
+        // Применяем настройки интерфейса
+        if (options.interfaceConfigOverwrite) {
+            hashParams.append('interfaceConfig.DISABLE_VIDEO_BACKGROUND', 'true');
+            hashParams.append('interfaceConfig.DISABLE_DOMINANT_SPEAKER_INDICATOR', 'true');
+            
+            // Toolbar buttons
+            const toolbarButtons = [
+                'camera',
+                'desktop',
+                'microphone', 
+                'settings',
+                'fullscreen',
+                'hangup'
+            ];
+            hashParams.append('interfaceConfig.TOOLBAR_BUTTONS', JSON.stringify(toolbarButtons));
+        }
+        
+        // User info
         if (options.displayName) hashParams.append('userInfo.displayName', options.displayName);
         if (options.email) hashParams.append('userInfo.email', options.email);
-        if (options.avatarUrl) hashParams.append('userInfo.avatar', options.avatarUrl);
+        if (options.avatarUrl) hashParams.append('userInfo.avatarURL', options.avatarUrl);
         
         if (hashParams.toString()) {
             url += '#' + hashParams.toString();
@@ -1645,35 +1790,122 @@ export class JitsiManager {
                     window.__conferenceEventHandlersInstalled = true;
                     console.log('[JITSI-EVENTS] Installing conference event handlers...');
                     
-                    // Отслеживаем подключение к конференции
+                    // Флаг для предотвращения множественных вызовов
+                    let isLeavingConference = false;
+                    let hasJoinedConference = false;
+                    
+                    // Функция для безопасного вызова conference-left
+                    const triggerConferenceLeft = (reason) => {
+                        // Игнорируем события если еще не присоединились к конференции
+                        if (!hasJoinedConference && reason !== 'videoConferenceLeft') {
+                            console.log('[JITSI-EVENTS] Ignoring leave event - not joined yet');
+                            return;
+                        }
+                        
+                        // Для videoConferenceLeft не проверяем дубликаты, так как это финальное событие
+                        if (reason !== 'videoConferenceLeft' && isLeavingConference) {
+                            console.log('[JITSI-EVENTS] Already leaving, ignoring duplicate event');
+                            return;
+                        }
+                        
+                        if (reason === 'videoConferenceLeft') {
+                            // Это финальное событие - всегда обрабатываем
+                            isLeavingConference = true;
+                        }
+                        
+                        console.log('[JITSI-EVENTS] Triggering conference left:', reason);
+                        if (window.ipcRenderer) {
+                            window.ipcRenderer.invoke('jitsi:conference-left', { 
+                                reason: reason,
+                                timestamp: Date.now()
+                            }).then(() => {
+                                // Сброс флага через некоторое время на случай ошибки
+                                if (reason !== 'videoConferenceLeft') {
+                                    setTimeout(() => {
+                                        isLeavingConference = false;
+                                    }, 5000);
+                                }
+                            });
+                        }
+                    };
+                    
+                    // Функция для обработки присоединения
+                    const triggerConferenceJoined = () => {
+                        hasJoinedConference = true;
+                        isLeavingConference = false;
+                        console.log('[JITSI-EVENTS] Conference joined');
+                        if (window.ipcRenderer) {
+                            window.ipcRenderer.invoke('jitsi:conference-joined');
+                        }
+                    };
+                    
+                    // === ОТСЛЕЖИВАНИЕ JITSI IFRAME API EVENTS ===
+                    // Это самый надежный способ для встроенного Jitsi
+                    const setupIframeAPIListeners = () => {
+                        // Проверяем наличие Jitsi iframe API
+                        if (window.JitsiMeetExternalAPI || window.api) {
+                            console.log('[JITSI-EVENTS] Setting up iframe API listeners');
+                            
+                            // Слушаем глобальные события через postMessage
+                            window.addEventListener('message', (event) => {
+                                if (event.data && event.data.type) {
+                                    // Jitsi отправляет события через postMessage
+                                    switch(event.data.type) {
+                                        case 'video-conference-joined':
+                                        case 'videoConferenceJoined':
+                                            console.log('[JITSI-EVENTS] videoConferenceJoined via postMessage');
+                                            triggerConferenceJoined();
+                                            break;
+                                            
+                                        case 'video-conference-left':
+                                        case 'videoConferenceLeft':
+                                            console.log('[JITSI-EVENTS] videoConferenceLeft via postMessage');
+                                            triggerConferenceLeft('videoConferenceLeft');
+                                            break;
+                                    }
+                                }
+                            });
+                        }
+                    };
+                    
+                    // === ОТСЛЕЖИВАНИЕ NATIVE JITSI EVENTS ===
                     if (window.APP && window.APP.conference) {
                         // Ждем, пока room станет доступен
                         const waitForRoom = () => {
                             if (window.APP.conference.room) {
+                                const room = window.APP.conference.room;
+                                
                                 // Событие присоединения к комнате
-                                window.APP.conference.room.on('conference.joined', function() {
-                                    console.log('[JITSI-EVENTS] Conference joined');
-                                    if (window.ipcRenderer) {
-                                        window.ipcRenderer.invoke('jitsi:conference-joined');
-                                    }
+                                room.on('conference.joined', function() {
+                                    console.log('[JITSI-EVENTS] Conference joined (native)');
+                                    triggerConferenceJoined();
                                 });
                                 
                                 // Событие выхода из комнаты
-                                window.APP.conference.room.on('conference.left', function() {
-                                    console.log('[JITSI-EVENTS] Conference left');
-                                    if (window.ipcRenderer) {
-                                        window.ipcRenderer.invoke('jitsi:conference-left', { 
-                                            reason: 'conference_left_event' 
-                                        });
+                                room.on('conference.left', function() {
+                                    console.log('[JITSI-EVENTS] Conference left (native)');
+                                    triggerConferenceLeft('conference_left_event');
+                                });
+                                
+                                // Событие отключения
+                                room.on('conference.disconnected', function() {
+                                    console.log('[JITSI-EVENTS] Conference disconnected');
+                                    triggerConferenceLeft('conference_disconnected');
+                                });
+                                
+                                // Событие ошибки подключения
+                                room.on('conference.error', function(error) {
+                                    console.log('[JITSI-EVENTS] Conference error:', error);
+                                    if (error === 'conference.connectionError' || 
+                                        error === 'conference.connectionFailed') {
+                                        triggerConferenceLeft('connection_error');
                                     }
                                 });
                                 
                                 // Если уже в комнате
-                                if (window.APP.conference.room.isJoined && window.APP.conference.room.isJoined()) {
+                                if (room.isJoined && room.isJoined()) {
                                     console.log('[JITSI-EVENTS] Already in conference');
-                                    if (window.ipcRenderer) {
-                                        window.ipcRenderer.invoke('jitsi:conference-joined');
-                                    }
+                                    triggerConferenceJoined();
                                 }
                             } else {
                                 // Если room еще не готов, проверяем снова через 100ms
@@ -1682,50 +1914,115 @@ export class JitsiManager {
                         };
                         
                         waitForRoom();
-                        
-                        // Перехватываем функцию hangup
-                        const originalHangup = window.APP.conference.hangup;
-                        if (originalHangup) {
-                            window.APP.conference.hangup = function() {
-                                console.log('[JITSI-EVENTS] Hangup called');
-                                if (window.ipcRenderer) {
-                                    window.ipcRenderer.invoke('jitsi:conference-left', { 
-                                        reason: 'hangup' 
-                                    });
-                                }
-                                return originalHangup.apply(this, arguments);
-                            };
-                        }
                     }
                     
-                    // Слушаем кнопку завершения через MutationObserver
-                    const observeHangupButton = () => {
+                    // === ОТСЛЕЖИВАНИЕ JITSI EXTERNAL API ===
+                    // Ищем внешний API Jitsi (для iframe интеграции)
+                    const checkForExternalAPI = () => {
+                        // Проверяем различные способы доступа к API
+                        const possibleAPIs = [
+                            window.JitsiMeetExternalAPI,
+                            window.JitsiMeetJS,
+                            window.api,
+                            window.jitsiAPI,
+                            window.meetAPI
+                        ];
+                        
+                        for (let api of possibleAPIs) {
+                            if (api && api.on) {
+                                console.log('[JITSI-EVENTS] Found Jitsi External API');
+                                
+                                // Подписываемся на события
+                                api.on('videoConferenceJoined', (event) => {
+                                    console.log('[JITSI-EVENTS] videoConferenceJoined (external API)', event);
+                                    triggerConferenceJoined();
+                                });
+                                
+                                api.on('videoConferenceLeft', (event) => {
+                                    console.log('[JITSI-EVENTS] videoConferenceLeft (external API)', event);
+                                    triggerConferenceLeft('videoConferenceLeft');
+                                });
+                                
+                                api.on('readyToClose', (event) => {
+                                    console.log('[JITSI-EVENTS] readyToClose (external API)', event);
+                                    triggerConferenceLeft('videoConferenceLeft');
+                                });
+                                
+                                break;
+                            }
+                        }
+                    };
+                    
+                    // === МОНИТОРИНГ DOM ДЛЯ СОБЫТИЙ UI ===
+                    // Слушаем кнопки в дополнительном меню после нажатия "Завершить"
+                    const observeEndMeetingMenu = () => {
                         const observer = new MutationObserver((mutations) => {
-                            const hangupButtonSelectors = [
-                                '[aria-label*="Leave" i]',
-                                '[aria-label*="Hangup" i]',
-                                '[aria-label*="Покинуть" i]',
-                                '[aria-label*="Завершить" i]',
-                                '.hangup-button',
-                                '[data-testid="hangup-button"]'
+                            // Селекторы для кнопок в меню завершения
+                            const endMeetingSelectors = [
+                                // Английские варианты
+                                '[aria-label*="Leave meeting" i]',
+                                '[aria-label*="End meeting for all" i]',
+                                '[data-testid="end-meeting-leave"]',
+                                '[data-testid="end-meeting-for-all"]',
+                                'button:contains("Leave")',
+                                'button:contains("End for all")',
+                                
+                                // Русские варианты
+                                '[aria-label*="Покинуть" i]:not([aria-label*="меню" i])',
+                                '[aria-label*="Завершить для всех" i]',
+                                'button:contains("Покинуть")',
+                                'button:contains("Завершить для всех")',
+                                
+                                // Общие селекторы для popup меню
+                                '.modal-dialog-footer button',
+                                '.dialog-footer button',
+                                '.end-meeting-dialog button',
+                                '[role="dialog"] button'
                             ];
                             
-                            hangupButtonSelectors.forEach(selector => {
-                                const buttons = document.querySelectorAll(selector);
-                                buttons.forEach(button => {
-                                    if (!button.__hangupListenerAdded) {
-                                        button.__hangupListenerAdded = true;
-                                        button.addEventListener('click', () => {
-                                            console.log('[JITSI-EVENTS] Hangup button clicked');
-                                            if (window.ipcRenderer) {
-                                                window.ipcRenderer.invoke('jitsi:conference-left', { 
-                                                    reason: 'button_click' 
-                                                });
-                                            }
-                                        });
-                                        console.log('[JITSI-EVENTS] Added listener to hangup button');
+                            endMeetingSelectors.forEach(selector => {
+                                let buttons;
+                                
+                                // Для :contains используем jQuery если доступен
+                                if (selector.includes(':contains')) {
+                                    if (window.$ || window.jQuery) {
+                                        buttons = (window.$ || window.jQuery)(selector);
+                                    } else {
+                                        // Fallback без jQuery
+                                        const searchText = selector.match(/:contains\\("(.+?)"\\)/)?.[1];
+                                        if (searchText) {
+                                            buttons = Array.from(document.querySelectorAll('button')).filter(
+                                                btn => btn.textContent.includes(searchText)
+                                            );
+                                        }
                                     }
-                                });
+                                } else {
+                                    buttons = document.querySelectorAll(selector);
+                                }
+                                
+                                if (buttons && buttons.length > 0) {
+                                    (buttons.forEach ? buttons : Array.from(buttons)).forEach(button => {
+                                        if (!button.__endMeetingListenerAdded) {
+                                            button.__endMeetingListenerAdded = true;
+                                            
+                                            button.addEventListener('click', () => {
+                                                const buttonText = button.textContent || button.getAttribute('aria-label') || '';
+                                                console.log('[JITSI-EVENTS] End meeting menu button clicked:', buttonText);
+                                                
+                                                // Ждем немного, чтобы Jitsi обработал клик и отправил videoConferenceLeft
+                                                // Но если событие не придет, принудительно закрываем через 2 секунды
+                                                setTimeout(() => {
+                                                    if (!isLeavingConference) {
+                                                        console.log('[JITSI-EVENTS] No videoConferenceLeft received, forcing close');
+                                                        triggerConferenceLeft('videoConferenceLeft');
+                                                    }
+                                                }, 2000);
+                                            });
+                                            
+                                            console.log('[JITSI-EVENTS] Added listener to end meeting button:', button.textContent);
+                                        }
+                                    });
+                                }
                             });
                         });
                         
@@ -1735,7 +2032,54 @@ export class JitsiManager {
                         });
                     };
                     
-                    observeHangupButton();
+                    // === ПЕРЕХВАТ JITSI API МЕТОДОВ ===
+                    const interceptJitsiMethods = () => {
+                        // Ждем появления APP.conference
+                        const interceptInterval = setInterval(() => {
+                            if (window.APP && window.APP.conference) {
+                                clearInterval(interceptInterval);
+                                
+                                // Слушаем событие videoConferenceLeft напрямую
+                                if (window.APP.store) {
+                                    const originalDispatch = window.APP.store.dispatch;
+                                    window.APP.store.dispatch = function(action) {
+                                        if (action && action.type) {
+                                            if (action.type === 'CONFERENCE_LEFT' || 
+                                                action.type === 'CONFERENCE_WILL_LEAVE') {
+                                                console.log('[JITSI-EVENTS] Redux action:', action.type);
+                                                triggerConferenceLeft('videoConferenceLeft');
+                                            } else if (action.type === 'CONFERENCE_JOINED') {
+                                                console.log('[JITSI-EVENTS] Redux action: CONFERENCE_JOINED');
+                                                triggerConferenceJoined();
+                                            }
+                                        }
+                                        return originalDispatch.apply(this, arguments);
+                                    };
+                                }
+                            }
+                        }, 100);
+                        
+                        // Останавливаем через 10 секунд если не нашли
+                        setTimeout(() => clearInterval(interceptInterval), 10000);
+                    };
+                    
+                    // === ЗАПУСК ВСЕХ LISTENERS ===
+                    setupIframeAPIListeners();
+                    checkForExternalAPI();
+                    observeEndMeetingMenu();
+                    interceptJitsiMethods();
+                    
+                    // Проверяем External API с задержкой (может загрузиться позже)
+                    setTimeout(checkForExternalAPI, 1000);
+                    setTimeout(checkForExternalAPI, 3000);
+                    
+                    // Дополнительно слушаем событие beforeunload
+                    window.addEventListener('beforeunload', (e) => {
+                        console.log('[JITSI-EVENTS] Page unloading');
+                        if (hasJoinedConference && !isLeavingConference) {
+                            triggerConferenceLeft('page_unload');
+                        }
+                    });
                     
                     console.log('[JITSI-EVENTS] ✅ Conference event handlers installed');
                 })();

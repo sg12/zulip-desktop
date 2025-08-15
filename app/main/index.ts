@@ -42,24 +42,11 @@ import { ipcMain, send } from "./typed-ipc-main.js";
 import { NativeCaptureManager } from './native-capture';
 import { JitsiManager } from './jitsi-manager';
 
-
-
-// const { JitsiMeetElectron } = require('@jitsi/electron-sdk');
-
-// Глобальная переменная для Jitsi окна
-
-let JitsiMeetElectron: any;
-try {
-    const jitsiModule = require('@jitsi/electron-sdk');
-    JitsiMeetElectron = jitsiModule.default || jitsiModule.JitsiMeetElectron || jitsiModule;
-    log.info(`🎯[Jitsi SDK] Module loaded:`, typeof JitsiMeetElectron);
-} catch (error: any) {
-    log.error(`🎯[Jitsi SDK] Failed to load module:`, error.message);
-}
-
-const JWT_SECRET = "HguV/8QBrJdCih2Ycpoz0g5q5m85apT3Nu6E+lDvufg=";
-
 let screenCaptureAddon: any = null;
+let jitsiSDKAvailable = false;
+let JitsiMeetElectron: any = null;
+
+
         
 // В index.ts добавьте в начало файла:
 import * as fs from 'fs';
@@ -131,6 +118,17 @@ const vKeyToName: { [key: number]: KeyName } = {
   190: 'DOT',
   191: 'FORWARD SLASH'
 };
+
+try {
+    const jitsiModule = require('@jitsi/electron-sdk');
+    JitsiMeetElectron = jitsiModule.default || jitsiModule.JitsiMeetElectron || jitsiModule;
+    jitsiSDKAvailable = true;
+    log.info(`🎯[Jitsi SDK] Module loaded successfully, SDK is AVAILABLE`);
+} catch (error: any) {
+    jitsiSDKAvailable = false;
+    log.error(`🎯[Jitsi SDK] Failed to load module: ${error.message}`);
+    log.info(`🎯[Jitsi SDK] SDK is NOT AVAILABLE, iframe will be used`);
+}
 
 class CustomKeyboardListener extends GlobalKeyboardListener {
   public startListener(): Promise<void> {
@@ -460,10 +458,58 @@ async function createMainWindow(): Promise<BrowserWindow> {
           const url = content.getURL();
           if (url && url.includes('joinrm-svz')) {
               content.executeJavaScript(`
-                  if (window.electron_bridge && window.electron_bridge.emit_event) {
-                      window.electron_bridge.emit_event('${eventName}', ${JSON.stringify(data)});
-                      console.log('[Electron->Zulip] Sent event: ${eventName}');
-                  }
+                  (function() {
+                      // Отправляем событие через electron_bridge
+                      if (window.electron_bridge && window.electron_bridge.emit_event) {
+                          window.electron_bridge.emit_event('${eventName}', ${JSON.stringify(data)});
+                          console.log('[Electron->Zulip] Sent event: ${eventName}');
+                      }
+                      
+                      // Дополнительно обрабатываем специальные события
+                      if ('${eventName}' === 'jitsi-loading-started') {
+                          // Показываем индикатор загрузки в Zulip UI
+                          const indicator = document.createElement('div');
+                          indicator.id = 'jitsi-loading-indicator';
+                          indicator.style.cssText = \`
+                              position: fixed;
+                              top: 50%;
+                              left: 50%;
+                              transform: translate(-50%, -50%);
+                              background: rgba(0, 0, 0, 0.8);
+                              color: white;
+                              padding: 20px 40px;
+                              border-radius: 10px;
+                              z-index: 10000;
+                              font-size: 16px;
+                              display: flex;
+                              align-items: center;
+                              gap: 15px;
+                          \`;
+                          indicator.innerHTML = \`
+                              <div style="
+                                  width: 24px;
+                                  height: 24px;
+                                  border: 3px solid rgba(255, 255, 255, 0.3);
+                                  border-top-color: white;
+                                  border-radius: 50%;
+                                  animation: spin 1s linear infinite;
+                              "></div>
+                              <style>
+                                  @keyframes spin {
+                                      to { transform: rotate(360deg); }
+                                  }
+                              </style>
+                              <span>${data.message || 'Загрузка...'}</span>
+                          \`;
+                          document.body.appendChild(indicator);
+                      } else if ('${eventName}' === 'jitsi-loading-finished') {
+                          // Убираем индикатор загрузки
+                          const indicator = document.getElementById('jitsi-loading-indicator');
+                          if (indicator) {
+                              indicator.remove();
+                          }
+                      }
+                  })();
               `).catch(err => {
                   log.error(`Failed to send event to Zulip: ${err.message}`);
               });
@@ -608,42 +654,212 @@ async function createMainWindow(): Promise<BrowserWindow> {
 
 
   ipcMain.handle("jitsi-connect-with-zulip-config", async (event, options) => {
-    log.info("🎯[Jitsi] Connecting with Zulip config...");
-    log.info(`🎯[Jitsi] Options received: ${JSON.stringify(options)}`);
+      log.info("🎯[Jitsi] Connecting with Zulip config...");
+      log.info(`🎯[Jitsi] Options received: ${JSON.stringify(options)}`);
+      log.info(`🎯[Jitsi] SDK Available: ${jitsiSDKAvailable}`);
 
-    try {
-        // Используем JitsiManager вместо createJitsiWindow
-        const result = await jitsiManager.createWindow({
-            roomName: options.roomName || '',
-            serverUrl: options.serverUrl || 'https://jitsi-connectrm.ru',
-            displayName: options.userInfo?.displayName || 'Guest',
-            email: options.userInfo?.email || '',
-            avatarUrl: options.userInfo?.avatarUrl || '',
-            jwt: options.jwt || ''
-        });
-        
-        if (result.success) {
-            log.info(`🎯[Jitsi] Conference window created successfully`);
-            
-            // Отправляем подтверждение обратно в Zulip
-            setTimeout(() => {
-                sendEventToZulip('jitsi-conference-ready', {
-                    success: true,
-                    roomName: options.roomName
-                });
-            }, 1000);
-        }
-        
-        return result;
-        
-    } catch (error: any) {
-        log.error(`🎯[Jitsi] Error: ${error.message}`);
-        return { 
-            success: false, 
-            error: error.message,
-            fallbackToBrowser: true
-        };
-    }
+      try {
+          // ВАЖНО: Если SDK недоступен, сразу возвращаем fallback
+          if (!jitsiSDKAvailable) {
+              log.info("🎯[Jitsi] SDK not available, returning fallback immediately");
+              return { 
+                  success: false, 
+                  error: "Jitsi SDK not installed",
+                  fallbackToBrowser: true,
+                  sdkNotAvailable: true
+              };
+          }
+
+          // Если SDK доступен, НЕ разрешаем fallback
+          log.info("🎯[Jitsi] SDK is available, attempting to create window...");
+          
+          // Добавляем индикатор загрузки в Zulip
+          sendEventToZulip('jitsi-loading-started', {
+              message: 'Запуск Jitsi конференции...'
+          });
+
+          // Формируем конфигурацию с нужными параметрами
+          const jitsiConfig = {
+              prejoinConfig: { enabled: false },
+              disableSimulcast: true,
+              startWithVideoMuted: true,
+              startWithAudioMuted: false,
+              disableAudioLevels: false,
+              stereo: false,
+              echoCancellation: true,
+              noiseSuppression: true,
+              highpassFilter: true,
+              autoGainControl: true,
+              enableLipSync: false,
+              audioProcessing: {
+                  autoGainControl: true,
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  highpassFilter: true
+              },
+              hideConferenceSubject: true,
+              deeplinking: {
+                  disabled: true
+              },
+              resolution: 720,
+              disableRemoteMute: true,
+              disableKick: true,
+              disableGrantModerator: true,
+              disablePrivateChat: true,
+              disableSelfViewSettings: true,
+              disableLocalVideoFlip: true,
+              disableLocalStats: true,
+              disableAVModeration: true,
+              disableInviteFunctions: true,
+              participantsPane: {
+                  hideMoreActionsButton: true
+              },
+              breakoutRooms: {
+                  hideMoreActionsButton: true
+              },
+              filmstrip: {
+                  disableStageFilmstrip: true,
+                  disableResizable: true
+              },
+              // Logging настройки
+              apiLogLevels: ['error'],
+              logging: {
+                  defaultLogLevel: 'error',
+                  loggers: {
+                      'modules/RTC/TraceablePeerConnection.js': 'error',
+                      'modules/statistics/CallStats.js': 'error',
+                      'modules/xmpp/strophe.util.js': 'error',
+                      'modules/statistics/LocalStatsCollector.js': 'error'
+                  }
+              }
+          };
+
+          const interfaceConfig = {
+              DISABLE_VIDEO_BACKGROUND: true,
+              DISABLE_DOMINANT_SPEAKER_INDICATOR: true,
+              TOOLBAR_BUTTONS: [
+                  'camera',
+                  'desktop',
+                  'microphone',
+                  'settings',
+                  'fullscreen',
+                  'hangup'
+              ]
+          };
+
+          // Используем JitsiManager для создания окна с конфигурацией
+          const result = await jitsiManager.createWindow({
+              roomName: options.roomName || '',
+              serverUrl: options.serverUrl || 'https://jitsi-connectrm.ru',
+              displayName: options.userInfo?.displayName || 'Guest',
+              email: options.userInfo?.email || '',
+              avatarUrl: options.userInfo?.avatarURL || '',
+              jwt: options.jwt || '',
+              configOverwrite: jitsiConfig,
+              interfaceConfigOverwrite: interfaceConfig
+          });
+          
+          if (result.success) {
+              log.info(`🎯[Jitsi] Conference window created successfully`);
+              
+              // Убираем индикатор загрузки
+              sendEventToZulip('jitsi-loading-finished', {
+                  success: true
+              });
+              
+              // Отправляем подтверждение обратно в Zulip
+              setTimeout(() => {
+                  sendEventToZulip('jitsi-conference-ready', {
+                      success: true,
+                      roomName: options.roomName,
+                      usingSDK: true
+                  });
+              }, 1000);
+              
+              // ВАЖНО: НЕ возвращаем fallbackToBrowser при успехе
+              return {
+                  success: true,
+                  usingSDK: true
+              };
+          } else {
+              // Если создание окна не удалось, но SDK есть - пробуем еще раз
+              log.error(`🎯[Jitsi] Failed to create window, but SDK is available`);
+              
+              // Убираем индикатор загрузки
+              sendEventToZulip('jitsi-loading-finished', {
+                  success: false,
+                  error: result.error
+              });
+              
+              // ВАЖНО: НЕ разрешаем fallback, если SDK установлен
+              return { 
+                  success: false, 
+                  error: result.error || "Failed to create Jitsi window",
+                  fallbackToBrowser: false, // Запрещаем fallback
+                  retryable: true // Указываем, что можно повторить попытку
+              };
+          }
+          
+      } catch (error: any) {
+          log.error(`🎯[Jitsi] Error: ${error.message}`);
+          
+          // Убираем индикатор загрузки
+          sendEventToZulip('jitsi-loading-finished', {
+              success: false,
+              error: error.message
+          });
+          
+          // Если SDK установлен, НЕ разрешаем fallback даже при ошибке
+          if (jitsiSDKAvailable) {
+              log.info("🎯[Jitsi] Error occurred but SDK is available, NOT allowing fallback");
+              return { 
+                  success: false, 
+                  error: error.message,
+                  fallbackToBrowser: false, // Запрещаем fallback
+                  retryable: true
+              };
+          } else {
+              // Только если SDK точно недоступен
+              return { 
+                  success: false, 
+                  error: error.message,
+                  fallbackToBrowser: true,
+                  sdkNotAvailable: true
+              };
+          }
+      }
+  });
+
+  // Добавляем обработчик для проверки статуса SDK
+  ipcMain.handle("check-jitsi-sdk-status", async () => {
+      log.info(`🎯[Jitsi] SDK Status check: ${jitsiSDKAvailable ? 'AVAILABLE' : 'NOT AVAILABLE'}`);
+      
+      return {
+          sdkAvailable: jitsiSDKAvailable,
+          jitsiManagerReady: !!jitsiManager,
+          message: jitsiSDKAvailable 
+              ? "Jitsi SDK установлен и готов к использованию" 
+              : "Jitsi SDK не установлен, будет использован iframe"
+      };
+  });
+
+  // Добавляем обработчик для повторной попытки
+  ipcMain.handle("retry-jitsi-connection", async (event, options) => {
+      log.info("🎯[Jitsi] Retrying connection...");
+      
+      if (!jitsiSDKAvailable) {
+          return { 
+              success: false, 
+              error: "Jitsi SDK not available",
+              fallbackToBrowser: true 
+          };
+      }
+      
+      // Ждем немного перед повторной попыткой
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Повторяем попытку создания окна
+      return ipcMain.handle("jitsi-connect-with-zulip-config", event, options);
   });
 
   // Обработчики событий от Jitsi окна
