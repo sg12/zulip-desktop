@@ -126,8 +126,7 @@ export class JitsiManager {
     private config: JitsiManagerConfig;
     private videoQualityManager: VideoQualityManager;
     private activeMediaStreams: Set<string> = new Set();
-
-    private conferenceCheckInterval?: NodeJS.Timer;
+    private wasInConference: boolean = false;
 
     constructor(
         nativeCapture: NativeCaptureManager,
@@ -167,6 +166,29 @@ export class JitsiManager {
                 isStreamActive: this.state.isStreamActive,
                 streamId: this.state.streamId
             };
+        });
+
+        // НОВЫЙ: Jitsi полностью загружен и готов
+        ipcMain.handle("jitsi:ready", async () => {
+            log.info("[JITSI-MANAGER] Jitsi is ready");
+            await this.injectHandlers();
+            return { success: true };
+        });
+
+        // НОВЫЙ: Пользователь присоединился к конференции
+        ipcMain.handle("jitsi:conference-joined", async () => {
+            log.info("[JITSI-MANAGER] User joined conference");
+            this.wasInConference = true;
+            return { success: true };
+        });
+
+        // НОВЫЙ: Пользователь покинул конференцию
+        ipcMain.handle("jitsi:conference-left", async (event, data) => {
+            log.info(`[JITSI-MANAGER] User left conference: ${data.reason}`);
+            if (this.wasInConference) {
+                await this.closeWindow();
+            }
+            return { success: true };
         });
 
         // Сохранение выбранного источника
@@ -216,35 +238,25 @@ export class JitsiManager {
             log.info("[STREAM-ELECTRON] Stop native capture requested");
             
             try {
-                // Ядерная очистка всех streams
                 await this.nukeClearAllStreams();
                 log.info("[STREAM-ELECTRON] Nuclear cleanup executed");
                 
                 await new Promise(resolve => setTimeout(resolve, 200));
                 
-                // Останавливаем native capture
                 if (this.nativeCapture && this.nativeCapture.isCapturing) {
                     const stopResult = await this.nativeCapture.stopCapture();
                     log.info(`[STREAM-ELECTRON] Native capture stopped: ${JSON.stringify(stopResult)}`);
                 }
                 
-                // Принудительное освобождение ресурсов
                 await this.forceReleaseAllMediaResources();
                 
-                // Очищаем состояние
                 this.state.isStreamActive = false;
                 this.state.streamId = null;
                 this.state.videoFrameCount = 0;
                 this.state.audioFrameCount = 0;
                 
-                // Очищаем callbacks
                 this.nativeCapture.setFrameCallbacks(undefined, undefined);
-                
-                // Очищаем трекер streams
                 this.activeMediaStreams.clear();
-                log.info("[STREAM-ELECTRON] Stream tracker cleared");
-                
-                await new Promise(resolve => setTimeout(resolve, 500));
                 
                 log.info("[STREAM-ELECTRON] Complete cleanup finished");
                 return { success: true };
@@ -254,19 +266,17 @@ export class JitsiManager {
                 return { success: false, error: error.message };
             }
         });
-
-        ipcMain.handle("jitsi:conference-ended", async (event, data) => {
-            log.info(`[CONFERENCE-MONITOR] Conference ended event received: ${data.reason}`);
-            await this.handleConferenceEnd(data.reason);
-            return { success: true };
-        });
     }
 
+    
     async createWindow(options: JitsiOptions): Promise<{ success: boolean; error?: string }> {
         try {
             // Закрываем предыдущее окно если есть
             await this.closeWindow();
             await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Сбрасываем флаг
+            this.wasInConference = false;
 
             const server = options.serverUrl || 'https://jitsi-connectrm.ru';
             const roomName = options.roomName.replace(/[^a-zA-Z0-9-_]/g, '');
@@ -301,30 +311,13 @@ export class JitsiManager {
             // Загружаем страницу
             await this.state.window.loadURL(conferenceUrl);
             
-            // Инжектируем обработчики после загрузки
-            setTimeout(() => {
-                log.info("First injection attempt (3s)...");
-                this.injectHandlers();
-            }, 3000);
-            
-            setTimeout(() => {
-                log.info("Second injection attempt (5s)...");
-                this.injectHandlers();
-            }, 5000);
+            // Инжектируем слушатель готовности Jitsi
+            await this.injectReadinessDetector();
 
-            // ИСПРАВЛЕНО: Запускаем мониторинг состояния конференции
-            setTimeout(() => {
-                log.info("Starting conference monitoring (10s)...");
-                this.startConferenceMonitoring();  // Теперь вызывается
-            }, 10000);
-
-            // Обработчик закрытия
+            // Обработчик закрытия окна
             this.state.window.on('close', async (event) => {
-                log.info("[STREAM-ELECTRON] Window close event triggered");
+                log.info("[JITSI-MANAGER] Window close event triggered");
                 event.preventDefault();
-                
-                // Останавливаем мониторинг
-                this.stopConferenceMonitoring();
                 
                 await this.cleanup();
                 
@@ -336,8 +329,7 @@ export class JitsiManager {
             });
 
             this.state.window.on('closed', () => {
-                log.info("[STREAM-ELECTRON] Window closed event");
-                this.stopConferenceMonitoring();
+                log.info("[JITSI-MANAGER] Window closed event");
                 this.state.window = null;
             });
 
@@ -347,7 +339,8 @@ export class JitsiManager {
                     message.includes('[JitsiManager]') || 
                     message.includes('[NativeStream]') ||
                     message.includes('[SourcePicker]') ||
-                    message.includes('[STREAM-ELECTRON]')) {
+                    message.includes('[STREAM-ELECTRON]') ||
+                    message.includes('[JITSI-EVENTS]')) {
                     log.info(`Jitsi Console: ${message}`);
                 }
             });
@@ -390,20 +383,6 @@ export class JitsiManager {
         if (!this.state.window || this.state.window.isDestroyed()) return;
 
         try {
-            // Проверяем готовность Jitsi
-            const isReady = await this.state.window.webContents.executeJavaScript(`
-                (function() {
-                    const ready = !!(window.JitsiMeetJS && window.APP && window.APP.conference);
-                    console.log('[JitsiDebug] Checking readiness:', ready);
-                    return ready;
-                })();
-            `);
-
-            if (!isReady) {
-                log.warn("Jitsi not ready yet, skipping injection");
-                return;
-            }
-
             // Проверяем, не инжектировали ли уже
             const alreadyInjected = await this.state.window.webContents.executeJavaScript(`
                 !!(window.jitsiHandlersInjected)
@@ -422,9 +401,9 @@ export class JitsiManager {
             await this.state.window.webContents.executeJavaScript(`
                 ${this.getScreenShareInterceptorCode()}
             `);
-
-            // НОВОЕ: Инжектируем обработчик завершения конференции
-            await this.injectConferenceEndHandler();
+            
+            // Инжектируем обработчики событий конференции
+            await this.injectConferenceEventHandlers();
 
             log.info("✅ Handlers injected successfully");
 
@@ -1485,32 +1464,31 @@ export class JitsiManager {
     }
 
     async closeWindow(): Promise<void> {
-        log.info("[STREAM-ELECTRON] >>> closeWindow called");
-
-        this.stopConferenceMonitoring();
+        log.info("[JITSI-MANAGER] >>> closeWindow called");
+        
+        // Сбрасываем флаг
+        this.wasInConference = false;
         
         if (!this.state.window) {
-            log.info("[STREAM-ELECTRON] No window to close");
+            log.info("[JITSI-MANAGER] No window to close");
             return;
         }
         
         try {
-            // Сначала делаем cleanup
             await this.cleanup();
             
-            // Затем закрываем окно
             if (this.state.window && !this.state.window.isDestroyed()) {
                 this.state.window.removeAllListeners();
                 this.state.window.close();
-                log.info("[STREAM-ELECTRON] Window closed");
+                log.info("[JITSI-MANAGER] Window closed");
             }
             
         } catch (error: any) {
-            log.error(`[STREAM-ELECTRON] Error closing window: ${error.message}`);
+            log.error(`[JITSI-MANAGER] Error closing window: ${error.message}`);
             
         } finally {
             this.state.window = null;
-            log.info("[STREAM-ELECTRON] <<< closeWindow completed");
+            log.info("[JITSI-MANAGER] <<< closeWindow completed");
         }
     }
 
@@ -1594,9 +1572,9 @@ export class JitsiManager {
        } catch (error: any) {
            log.error(`[STREAM-ELECTRON] Nuke clear error: ${error.message}`);
        }
-   }
+    }
 
-   private async forceReleaseAllMediaResources(): Promise<void> {
+    private async forceReleaseAllMediaResources(): Promise<void> {
        if (!this.state.window || this.state.window.isDestroyed()) return;
        
        try {
@@ -1650,58 +1628,79 @@ export class JitsiManager {
        } catch (error: any) {
            log.error(`[STREAM-ELECTRON] Error releasing media resources: ${error.message}`);
        }
-   }
+    }
 
-   // НОВЫЙ МЕТОД: Инжекция обработчика завершения конференции
-    private async injectConferenceEndHandler(): Promise<void> {
+
+    private async injectConferenceEventHandlers(): Promise<void> {
         if (!this.state.window || this.state.window.isDestroyed()) return;
         
         try {
             await this.state.window.webContents.executeJavaScript(`
                 (function() {
-                    console.log('[CONFERENCE-MONITOR] Installing conference end handler...');
+                    if (window.__conferenceEventHandlersInstalled) {
+                        console.log('[JITSI-EVENTS] Handlers already installed');
+                        return;
+                    }
                     
-                    // Флаг для предотвращения множественных вызовов
-                    window.__conferenceEndHandled = false;
+                    window.__conferenceEventHandlersInstalled = true;
+                    console.log('[JITSI-EVENTS] Installing conference event handlers...');
                     
-                    // Функция обработки завершения конференции
-                    window.__handleConferenceEnd = function(reason) {
-                        if (window.__conferenceEndHandled) {
-                            console.log('[CONFERENCE-MONITOR] Conference end already handled');
-                            return;
-                        }
-                        
-                        window.__conferenceEndHandled = true;
-                        console.log('[CONFERENCE-MONITOR] Conference ended, reason:', reason);
-                        
-                        // Уведомляем main process
-                        if (window.ipcRenderer) {
-                            window.ipcRenderer.invoke('jitsi:conference-ended', { reason: reason });
-                        }
-                    };
-                    
-                    // Перехватываем событие ухода из комнаты
+                    // Отслеживаем подключение к конференции
                     if (window.APP && window.APP.conference) {
-                        // Способ 1: Слушаем событие CONFERENCE_LEFT
-                        if (window.APP.conference.room) {
-                            window.APP.conference.room.on('conference.left', function() {
-                                console.log('[CONFERENCE-MONITOR] Conference left event detected');
-                                window.__handleConferenceEnd('conference_left');
-                            });
-                        }
+                        // Ждем, пока room станет доступен
+                        const waitForRoom = () => {
+                            if (window.APP.conference.room) {
+                                // Событие присоединения к комнате
+                                window.APP.conference.room.on('conference.joined', function() {
+                                    console.log('[JITSI-EVENTS] Conference joined');
+                                    if (window.ipcRenderer) {
+                                        window.ipcRenderer.invoke('jitsi:conference-joined');
+                                    }
+                                });
+                                
+                                // Событие выхода из комнаты
+                                window.APP.conference.room.on('conference.left', function() {
+                                    console.log('[JITSI-EVENTS] Conference left');
+                                    if (window.ipcRenderer) {
+                                        window.ipcRenderer.invoke('jitsi:conference-left', { 
+                                            reason: 'conference_left_event' 
+                                        });
+                                    }
+                                });
+                                
+                                // Если уже в комнате
+                                if (window.APP.conference.room.isJoined && window.APP.conference.room.isJoined()) {
+                                    console.log('[JITSI-EVENTS] Already in conference');
+                                    if (window.ipcRenderer) {
+                                        window.ipcRenderer.invoke('jitsi:conference-joined');
+                                    }
+                                }
+                            } else {
+                                // Если room еще не готов, проверяем снова через 100ms
+                                setTimeout(waitForRoom, 100);
+                            }
+                        };
                         
-                        // Способ 2: Перехватываем hangup функцию
+                        waitForRoom();
+                        
+                        // Перехватываем функцию hangup
                         const originalHangup = window.APP.conference.hangup;
                         if (originalHangup) {
                             window.APP.conference.hangup = function() {
-                                console.log('[CONFERENCE-MONITOR] Hangup called');
-                                window.__handleConferenceEnd('hangup');
+                                console.log('[JITSI-EVENTS] Hangup called');
+                                if (window.ipcRenderer) {
+                                    window.ipcRenderer.invoke('jitsi:conference-left', { 
+                                        reason: 'hangup' 
+                                    });
+                                }
                                 return originalHangup.apply(this, arguments);
                             };
                         }
-                        
-                        // Способ 3: Слушаем кнопку завершения через DOM
-                        const observeHangupButton = () => {
+                    }
+                    
+                    // Слушаем кнопку завершения через MutationObserver
+                    const observeHangupButton = () => {
+                        const observer = new MutationObserver((mutations) => {
                             const hangupButtonSelectors = [
                                 '[aria-label*="Leave" i]',
                                 '[aria-label*="Hangup" i]',
@@ -1717,137 +1716,60 @@ export class JitsiManager {
                                     if (!button.__hangupListenerAdded) {
                                         button.__hangupListenerAdded = true;
                                         button.addEventListener('click', () => {
-                                            console.log('[CONFERENCE-MONITOR] Hangup button clicked');
-                                            setTimeout(() => {
-                                                window.__handleConferenceEnd('button_click');
-                                            }, 100);
+                                            console.log('[JITSI-EVENTS] Hangup button clicked');
+                                            if (window.ipcRenderer) {
+                                                window.ipcRenderer.invoke('jitsi:conference-left', { 
+                                                    reason: 'button_click' 
+                                                });
+                                            }
                                         });
+                                        console.log('[JITSI-EVENTS] Added listener to hangup button');
                                     }
                                 });
                             });
-                        };
-                        
-                        // Наблюдаем за добавлением кнопок
-                        const observer = new MutationObserver(() => {
-                            observeHangupButton();
                         });
                         
                         observer.observe(document.body, {
                             childList: true,
                             subtree: true
                         });
-                        
-                        // Первоначальная проверка
-                        observeHangupButton();
-                    }
+                    };
                     
-                    // Способ 4: Перехват через API событие
-                    if (window.JitsiMeetJS && window.JitsiMeetJS.events) {
-                        const connectionEvents = window.JitsiMeetJS.events.connection;
-                        if (connectionEvents && connectionEvents.CONNECTION_DISCONNECTED) {
-                            // Слушаем отключение
-                            if (window.APP && window.APP.connection) {
-                                window.APP.connection.addEventListener(
-                                    connectionEvents.CONNECTION_DISCONNECTED,
-                                    () => {
-                                        console.log('[CONFERENCE-MONITOR] Connection disconnected');
-                                        window.__handleConferenceEnd('connection_lost');
-                                    }
-                                );
-                            }
-                        }
-                    }
+                    observeHangupButton();
                     
-                    console.log('[CONFERENCE-MONITOR] ✅ Conference end handler installed');
+                    console.log('[JITSI-EVENTS] ✅ Conference event handlers installed');
                 })();
             `);
         } catch (error: any) {
-            log.error(`[CONFERENCE-MONITOR] Failed to inject end handler: ${error.message}`);
+            log.error(`[JITSI-MANAGER] Failed to inject event handlers: ${error.message}`);
         }
     }
 
-    // НОВЫЙ МЕТОД: Мониторинг состояния конференции
-    private startConferenceMonitoring(): void {
-        if (this.conferenceCheckInterval) {
-            clearInterval(this.conferenceCheckInterval);
-        }
+    private async injectReadinessDetector(): Promise<void> {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
         
-        log.info("[CONFERENCE-MONITOR] Starting conference state monitoring");
-        
-        // Проверяем состояние каждые 5 секунд
-        this.conferenceCheckInterval = setInterval(async () => {
-            if (!this.state.window || this.state.window.isDestroyed()) {
-                this.stopConferenceMonitoring();
-                return;
-            }
-            
-            try {
-                const conferenceState = await this.state.window.webContents.executeJavaScript(`
-                    (function() {
-                        const state = {
-                            hasConference: false,
-                            isInRoom: false,
-                            connectionState: 'unknown',
-                            participantCount: 0
-                        };
-                        
-                        if (window.APP && window.APP.conference) {
-                            state.hasConference = true;
+        try {
+            await this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    console.log('[JITSI-EVENTS] Installing readiness detector...');
+                    
+                    // Ждем полной загрузки Jitsi API
+                    const checkJitsiReady = setInterval(() => {
+                        if (window.JitsiMeetJS && window.APP && window.APP.conference) {
+                            clearInterval(checkJitsiReady);
+                            console.log('[JITSI-EVENTS] Jitsi is ready!');
                             
-                            if (window.APP.conference.room) {
-                                state.isInRoom = window.APP.conference.room.isJoined?.() || false;
-                                
-                                // Получаем количество участников
-                                const participants = window.APP.conference.room.getParticipants?.();
-                                if (participants) {
-                                    state.participantCount = participants.length + 1; // +1 для себя
-                                }
-                            }
-                            
-                            if (window.APP.connection) {
-                                state.connectionState = window.APP.connection.isConnected?.() ? 'connected' : 'disconnected';
+                            // Уведомляем main process
+                            if (window.ipcRenderer) {
+                                window.ipcRenderer.invoke('jitsi:ready');
                             }
                         }
-                        
-                        return state;
-                    })();
-                `);
-                
-                // Если конференция завершена (нет подключения к комнате)
-                if (!conferenceState.isInRoom && conferenceState.connectionState === 'disconnected') {
-                    log.info("[CONFERENCE-MONITOR] Conference appears to be ended, closing window");
-                    this.handleConferenceEnd('monitoring_detected');
-                }
-                
-            } catch (error: any) {
-                log.error(`[CONFERENCE-MONITOR] Error checking conference state: ${error.message}`);
-            }
-        }, 5000);
-    }
-
-    // НОВЫЙ МЕТОД: Остановка мониторинга
-    private stopConferenceMonitoring(): void {
-        if (this.conferenceCheckInterval) {
-            clearInterval(this.conferenceCheckInterval);
-            this.conferenceCheckInterval = undefined;
-            log.info("[CONFERENCE-MONITOR] Stopped conference monitoring");
+                    }, 100);
+                })();
+            `);
+        } catch (error: any) {
+            log.error(`[JITSI-MANAGER] Failed to inject readiness detector: ${error.message}`);
         }
-    }
-
-    // НОВЫЙ МЕТОД: Обработка завершения конференции
-    private async handleConferenceEnd(reason: string): Promise<void> {
-        log.info(`[CONFERENCE-MONITOR] Handling conference end, reason: ${reason}`);
-        
-        // Останавливаем мониторинг чтобы избежать повторных вызовов
-        this.stopConferenceMonitoring();
-        
-        // Даем небольшую задержку для завершения всех операций Jitsi
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Закрываем окно
-        await this.closeWindow();
-        
-        log.info("[CONFERENCE-MONITOR] Window closed after conference end");
     }
 }
 
