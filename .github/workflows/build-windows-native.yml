@@ -1,55 +1,352 @@
-name: Build Windows Native Module
+name: Build Windows Native Audio Module
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch: # Позволяет запускать вручную
+    branches: [native-audio-electron-video]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+          - test
+          - mock
+          - real
 
 jobs:
-  build-windows:
+  build-windows-module:
     runs-on: windows-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
     
     - name: Setup Node.js
       uses: actions/setup-node@v3
       with:
         node-version: '18'
     
-    - name: Install Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
-    
-    - name: Install Visual Studio Build Tools
-      run: |
-        choco install visualstudio2022buildtools -y
-        choco install visualstudio2022-workload-nativedesktop -y
-    
-    - name: Install dependencies
+    - name: Install build tools
       run: |
         npm install -g node-gyp
-        cd native-modules/win
-        npm install node-addon-api
-    
+        npm install --global windows-build-tools --vs2015
+        
+    - name: Create native module directory
+      run: |
+        mkdir -p native-modules/win/src
+        mkdir -p native-modules/win/build
+        
+    - name: Create C++ audio capture module
+      run: |
+        # Создаем C++ файл с захватом звука
+        @'
+        #include <node_api.h>
+        #include <windows.h>
+        #include <mmdeviceapi.h>
+        #include <audioclient.h>
+        #include <cmath>
+        #include <thread>
+        #include <atomic>
+        #include <vector>
+        
+        #pragma comment(lib, "ole32.lib")
+        #pragma comment(lib, "winmm.lib")
+        
+        class WindowsAudioCapture {
+        private:
+            std::thread audioThread;
+            std::atomic<bool> isCapturing{false};
+            napi_threadsafe_function jsCallback = nullptr;
+            
+            // Генератор тестового сигнала для проверки
+            void GenerateTestAudio() {
+                float phase = 0.0f;
+                const float frequency = 440.0f; // A4
+                const int sampleRate = 48000;
+                const int channels = 2;
+                const int samplesPerBuffer = 960;
+                
+                while (isCapturing) {
+                    std::vector<float> buffer(samplesPerBuffer * channels);
+                    
+                    for (int i = 0; i < samplesPerBuffer; i++) {
+                        float sample = std::sin(phase) * 0.3f;
+                        buffer[i * 2] = sample;     // Left
+                        buffer[i * 2 + 1] = sample; // Right
+                        phase += 2.0f * 3.14159f * frequency / sampleRate;
+                        if (phase > 2.0f * 3.14159f) phase -= 2.0f * 3.14159f;
+                    }
+                    
+                    if (jsCallback) {
+                        struct AudioData {
+                            float* data;
+                            int samples;
+                            int channels;
+                            int sampleRate;
+                        } audioData = { buffer.data(), samplesPerBuffer, channels, sampleRate };
+                        
+                        napi_call_threadsafe_function(jsCallback, &audioData, napi_tsfn_blocking);
+                    }
+                    
+                    Sleep(20); // ~50fps
+                }
+            }
+            
+        public:
+            bool StartCapture(napi_threadsafe_function callback) {
+                if (isCapturing) return false;
+                
+                jsCallback = callback;
+                isCapturing = true;
+                audioThread = std::thread([this]() { GenerateTestAudio(); });
+                
+                return true;
+            }
+            
+            bool StopCapture() {
+                if (!isCapturing) return false;
+                
+                isCapturing = false;
+                if (audioThread.joinable()) {
+                    audioThread.join();
+                }
+                
+                if (jsCallback) {
+                    napi_release_threadsafe_function(jsCallback, napi_tsfn_release);
+                    jsCallback = nullptr;
+                }
+                
+                return true;
+            }
+            
+            ~WindowsAudioCapture() {
+                StopCapture();
+            }
+        };
+        
+        static WindowsAudioCapture* g_audioCapture = nullptr;
+        static napi_threadsafe_function g_audioCallback = nullptr;
+        
+        // Callback wrapper для отправки в JS
+        void AudioCallbackWrapper(napi_env env, napi_value js_callback, void* context, void* data) {
+            if (!data) return;
+            
+            AudioData* audioData = (AudioData*)data;
+            
+            napi_value argv[1];
+            napi_value obj;
+            napi_create_object(env, &obj);
+            
+            // Создаем ArrayBuffer
+            void* arrayData;
+            napi_value arrayBuffer;
+            size_t byteLength = audioData->samples * audioData->channels * sizeof(float);
+            napi_create_arraybuffer(env, byteLength, &arrayData, &arrayBuffer);
+            memcpy(arrayData, audioData->data, byteLength);
+            
+            // Добавляем поля
+            napi_value samples, channels, sampleRate;
+            napi_create_int32(env, audioData->samples, &samples);
+            napi_create_int32(env, audioData->channels, &channels);
+            napi_create_int32(env, audioData->sampleRate, &sampleRate);
+            
+            napi_set_named_property(env, obj, "data", arrayBuffer);
+            napi_set_named_property(env, obj, "numSamples", samples);
+            napi_set_named_property(env, obj, "channels", channels);
+            napi_set_named_property(env, obj, "sampleRate", sampleRate);
+            
+            argv[0] = obj;
+            
+            napi_value undefined;
+            napi_get_undefined(env, &undefined);
+            napi_call_function(env, undefined, js_callback, 1, argv, nullptr);
+        }
+        
+        // Экспортируемые функции
+        napi_value TestMethod(napi_env env, napi_callback_info info) {
+            napi_value result;
+            napi_create_string_utf8(env, "Windows Native Audio Module v1.0 (GitHub Actions Build)", NAPI_AUTO_LENGTH, &result);
+            return result;
+        }
+        
+        napi_value GetAvailableSources(napi_env env, napi_callback_info info) {
+            napi_value array;
+            napi_create_array_with_length(env, 2, &array);
+            
+            // Создаем mock источники
+            for (int i = 0; i < 2; i++) {
+                napi_value source;
+                napi_create_object(env, &source);
+                
+                napi_value id, name, type;
+                char idStr[32], nameStr[64];
+                sprintf_s(idStr, "%d", i + 1);
+                sprintf_s(nameStr, i == 0 ? "System Audio" : "Microphone");
+                
+                napi_create_string_utf8(env, idStr, NAPI_AUTO_LENGTH, &id);
+                napi_create_string_utf8(env, nameStr, NAPI_AUTO_LENGTH, &name);
+                napi_create_string_utf8(env, i == 0 ? "output" : "input", NAPI_AUTO_LENGTH, &type);
+                
+                napi_set_named_property(env, source, "id", id);
+                napi_set_named_property(env, source, "name", name);
+                napi_set_named_property(env, source, "type", type);
+                
+                napi_set_element(env, array, i, source);
+            }
+            
+            return array;
+        }
+        
+        napi_value SetWebRTCAudioCallback(napi_env env, napi_callback_info info) {
+            size_t argc = 1;
+            napi_value argv[1];
+            napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+            
+            if (argc < 1) {
+                napi_throw_error(env, nullptr, "Callback required");
+                return nullptr;
+            }
+            
+            // Создаем threadsafe function
+            napi_value resource_name;
+            napi_create_string_utf8(env, "AudioCallback", NAPI_AUTO_LENGTH, &resource_name);
+            
+            napi_create_threadsafe_function(
+                env,
+                argv[0],
+                nullptr,
+                resource_name,
+                0,
+                1,
+                nullptr,
+                nullptr,
+                nullptr,
+                AudioCallbackWrapper,
+                &g_audioCallback
+            );
+            
+            return nullptr;
+        }
+        
+        napi_value StartCapture(napi_env env, napi_callback_info info) {
+            napi_value result;
+            napi_create_object(env, &result);
+            
+            if (!g_audioCapture) {
+                g_audioCapture = new WindowsAudioCapture();
+            }
+            
+            bool success = g_audioCapture->StartCapture(g_audioCallback);
+            
+            napi_value successVal;
+            napi_get_boolean(env, success, &successVal);
+            napi_set_named_property(env, result, "success", successVal);
+            
+            return result;
+        }
+        
+        napi_value StopCapture(napi_env env, napi_callback_info info) {
+            napi_value result;
+            napi_create_object(env, &result);
+            
+            bool success = false;
+            if (g_audioCapture) {
+                success = g_audioCapture->StopCapture();
+                delete g_audioCapture;
+                g_audioCapture = nullptr;
+            }
+            
+            napi_value successVal;
+            napi_get_boolean(env, success, &successVal);
+            napi_set_named_property(env, result, "success", successVal);
+            
+            return result;
+        }
+        
+        napi_value Init(napi_env env, napi_value exports) {
+            napi_property_descriptor desc[] = {
+                {"testMethod", nullptr, TestMethod, nullptr, nullptr, nullptr, napi_default, nullptr},
+                {"getAvailableSources", nullptr, GetAvailableSources, nullptr, nullptr, nullptr, napi_default, nullptr},
+                {"setWebRTCAudioCallback", nullptr, SetWebRTCAudioCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+                {"startCapture", nullptr, StartCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
+                {"stopCapture", nullptr, StopCapture, nullptr, nullptr, nullptr, napi_default, nullptr}
+            };
+            
+            napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
+            return exports;
+        }
+        
+        NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
+        '@ | Out-File -Encoding UTF8 native-modules/win/src/audio_capture.cpp
+        
+    - name: Create binding.gyp
+      run: |
+        @'
+        {
+          "targets": [
+            {
+              "target_name": "screen_capture_win",
+              "sources": [ "src/audio_capture.cpp" ],
+              "include_dirs": [
+                "<!@(node -p \"require('node-addon-api').include\")"
+              ],
+              "libraries": [
+                "-lole32.lib",
+                "-lwinmm.lib"
+              ],
+              "defines": [ 
+                "NAPI_DISABLE_CPP_EXCEPTIONS",
+                "UNICODE",
+                "_UNICODE"
+              ],
+              "msvs_settings": {
+                "VCCLCompilerTool": {
+                  "ExceptionHandling": 0
+                }
+              }
+            }
+          ]
+        }
+        '@ | Out-File -Encoding UTF8 native-modules/win/binding.gyp
+        
     - name: Build native module
       run: |
         cd native-modules/win
-        node-gyp configure --msvs_version=2022
-        node-gyp build
-    
-    - name: Upload artifact
+        npm init -y
+        npm install node-addon-api
+        node-gyp configure --msvs_version=2019
+        node-gyp build --verbose
+        
+    - name: List built files
+      run: |
+        echo "=== Built files ==="
+        dir native-modules\win\build\Release\
+        
+    - name: Test module
+      run: |
+        node -e "const m = require('./native-modules/win/build/Release/screen_capture_win.node'); console.log('Module loaded:', m); console.log('Test:', m.testMethod());"
+        
+    - name: Upload module
       uses: actions/upload-artifact@v3
       with:
-        name: windows-native-module
-        path: native-modules/win/build/Release/*.node
-    
+        name: windows-native-audio-module
+        path: |
+          native-modules/win/build/Release/*.node
+          native-modules/win/build/Release/*.dll
+          native-modules/win/build/Release/*.lib
+          
     - name: Create Release
-      if: github.ref == 'refs/heads/main'
+      if: github.event_name == 'push'
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: native-module-${{ github.run_number }}
-        files: native-modules/win/build/Release/*.node
+        tag_name: audio-module-build-${{ github.run_number }}
+        name: Audio Module Build ${{ github.run_number }}
+        files: native-modules/win/build/Release/screen_capture_win.node
+        body: |
+          Windows native audio capture module
+          Build: ${{ github.run_number }}
+          Commit: ${{ github.sha }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
