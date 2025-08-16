@@ -338,6 +338,16 @@ export class JitsiManager {
             if (!result.success) {
                 log.error(`[JITSI-MANAGER] Failed to create window: ${result.error}`);
             }
+
+            this.state.window.on('ready-to-show', () => {
+                log.info("[JITSI-MANAGER] Window ready to show");
+                
+                // Отправляем событие в main process для уведомления Zulip
+                ipcMain.emit('jitsi-window-created', {
+                    success: true,
+                    windowId: this.state.window?.id
+                });
+            });
             
             return result;
 

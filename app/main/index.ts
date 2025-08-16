@@ -52,6 +52,85 @@ let JitsiMeetElectron: any = null;
 import * as fs from 'fs';
 import { nativeAddonWrapper } from "./native-addon-wrapper.js";
 
+const defaultJitsiConfig = {
+  prejoinConfig: { enabled: false },
+  disableSimulcast: true,
+  startWithVideoMuted: true,
+  startWithAudioMuted: false,
+  disableAudioLevels: false,
+  stereo: false,
+  echoCancellation: true,
+  noiseSuppression: true,
+  highpassFilter: true,
+  autoGainControl: true,
+  enableLipSync: false,
+  audioProcessing: {
+    autoGainControl: true,
+    echoCancellation: true,
+    noiseSuppression: true,
+    highpassFilter: true
+  },
+  hideConferenceSubject: true,
+  deeplinking: {
+    disabled: true
+  },
+  resolution: 720,
+  disableRemoteMute: true,
+  disableKick: true,
+  disableGrantModerator: true,
+  disablePrivateChat: true,
+  disableSelfViewSettings: true,
+  disableLocalVideoFlip: true,
+  disableLocalStats: true,
+  disableAVModeration: true,
+  disableInviteFunctions: true,
+  participantsPane: {
+    hideMoreActionsButton: true
+  },
+  breakoutRooms: {
+    hideMoreActionsButton: true
+  },
+  filmstrip: {
+    disableStageFilmstrip: true,
+    disableResizable: true
+  },
+  // Logging настройки
+  apiLogLevels: ['error'],
+  logging: {
+    defaultLogLevel: 'error',
+    loggers: {
+      'modules/RTC/TraceablePeerConnection.js': 'error',
+      'modules/statistics/CallStats.js': 'error',
+      'modules/xmpp/strophe.util.js': 'error',
+      'modules/statistics/LocalStatsCollector.js': 'error'
+    }
+  }
+};
+
+const defaultInterfaceConfig = {
+  DISABLE_VIDEO_BACKGROUND: true,
+  DISABLE_DOMINANT_SPEAKER_INDICATOR: true,
+  TOOLBAR_BUTTONS: [
+    'camera',
+    'desktop',
+    'microphone',
+    'settings',
+    'fullscreen',
+    'hangup'
+  ],
+  SHOW_JITSI_WATERMARK: false,
+  SHOW_WATERMARK_FOR_GUESTS: false,
+  SHOW_BRAND_WATERMARK: false,
+  BRAND_WATERMARK_LINK: '',
+  DISABLE_RINGING: true,
+  DISABLE_JOIN_LEAVE_NOTIFICATIONS: true,
+  DISABLE_PRESENCE_STATUS: true,
+  DISABLE_FOCUS_INDICATOR: true,
+  GENERATE_ROOMNAMES_ON_WELCOME_PAGE: false,
+  DISPLAY_WELCOME_PAGE_CONTENT: false,
+  HIDE_INVITE_MORE_HEADER: true
+};
+
 // Создаем поток для записи логов
 const preloadLogStream = fs.createWriteStream(
   path.join(process.cwd(), 'preload-debug.log'),
@@ -451,6 +530,53 @@ async function createMainWindow(): Promise<BrowserWindow> {
     _isOnline(url, ses),
   );
 
+  ipcMain.on('jitsi-window-created', (data) => {
+      log.info("[Main] Jitsi SDK window created, preventing iframe");
+      
+      // Отправляем во все Zulip webviews команду НЕ создавать iframe
+      const allContents = webContents.getAllWebContents();
+      for (const content of allContents) {
+          const url = content.getURL();
+          if (url && (url.includes('joinrm-svz') || url.includes('connectrm-svz'))) {
+              content.executeJavaScript(`
+                  (function() {
+                      // Устанавливаем глобальный флаг
+                      window.JITSI_SDK_ACTIVE = true;
+                      
+                      // Перехватываем создание iframe
+                      const originalCreateElement = document.createElement;
+                      document.createElement = function(tagName) {
+                          if (tagName.toLowerCase() === 'iframe') {
+                              const element = originalCreateElement.call(document, tagName);
+                              
+                              // Перехватываем установку src
+                              let srcValue = '';
+                              Object.defineProperty(element, 'src', {
+                                  get() { return srcValue; },
+                                  set(value) {
+                                      if (value && value.includes('jitsi') && window.JITSI_SDK_ACTIVE) {
+                                          console.log('[SDK] Blocking Jitsi iframe creation - SDK is active');
+                                          return;
+                                      }
+                                      srcValue = value;
+                                      element.setAttribute('src', value);
+                                  }
+                              });
+                              
+                              return element;
+                          }
+                          return originalCreateElement.call(document, tagName);
+                      };
+                      
+                      console.log('[SDK] Jitsi iframe blocker installed');
+                  })();
+              `).catch(err => {
+                  log.error(`Failed to block iframe: ${err.message}`);
+              });
+          }
+      }
+  });
+
   function sendEventToZulip(eventName: string, data: any): void {
       const allContents = webContents.getAllWebContents();
       for (const content of allContents) {
@@ -464,48 +590,22 @@ async function createMainWindow(): Promise<BrowserWindow> {
                           console.log('[Electron->Zulip] Sent event: ${eventName}');
                       }
                       
-                      // Дополнительно обрабатываем специальные события
-                      if ('${eventName}' === 'jitsi-loading-started') {
-                          // Показываем индикатор загрузки в Zulip UI
-                          const indicator = document.createElement('div');
-                          indicator.id = 'jitsi-loading-indicator';
-                          indicator.style.cssText = \`
-                              position: fixed;
-                              top: 50%;
-                              left: 50%;
-                              transform: translate(-50%, -50%);
-                              background: rgba(0, 0, 0, 0.8);
-                              color: white;
-                              padding: 20px 40px;
-                              border-radius: 10px;
-                              z-index: 10000;
-                              font-size: 16px;
-                              display: flex;
-                              align-items: center;
-                              gap: 15px;
-                          \`;
-                          indicator.innerHTML = \`
-                              <div style="
-                                  width: 24px;
-                                  height: 24px;
-                                  border: 3px solid rgba(255, 255, 255, 0.3);
-                                  border-top-color: white;
-                                  border-radius: 50%;
-                                  animation: spin 1s linear infinite;
-                              "></div>
-                              <style>
-                                  @keyframes spin {
-                                      to { transform: rotate(360deg); }
-                                  }
-                              </style>
-                              <span>${data.message || 'Загрузка...'}</span>
-                          \`;
-                          document.body.appendChild(indicator);
-                      } else if ('${eventName}' === 'jitsi-loading-finished') {
-                          // Убираем индикатор загрузки
-                          const indicator = document.getElementById('jitsi-loading-indicator');
-                          if (indicator) {
-                              indicator.remove();
+                      // КРИТИЧНО для SDK: Останавливаем создание iframe
+                      if ('${eventName}' === 'jitsi-sdk-handled' && ${data.stopIframe}) {
+                          // Ищем и останавливаем любые попытки создать iframe
+                          if (window.jitsiIframeCreationTimer) {
+                              clearTimeout(window.jitsiIframeCreationTimer);
+                              window.jitsiIframeCreationTimer = null;
+                          }
+                          
+                          // Устанавливаем флаг что SDK обработал
+                          window.jitsiSDKHandled = true;
+                          
+                          // Удаляем iframe если он уже создан
+                          const existingIframe = document.querySelector('iframe[src*="jitsi"]');
+                          if (existingIframe) {
+                              existingIframe.remove();
+                              console.log('[Electron->Zulip] Removed Jitsi iframe');
                           }
                       }
                   })();
@@ -638,88 +738,162 @@ async function createMainWindow(): Promise<BrowserWindow> {
 
 
   ipcMain.handle("jitsi-connect-with-zulip-config", async (event, options) => {
-    log.info("🎯[Jitsi] Connecting with Zulip config...");
-    log.info(`🎯[Jitsi] Options received: ${JSON.stringify(options)}`);
-    log.info(`🎯[Jitsi] SDK Available: ${jitsiSDKAvailable}`);
+      log.info("🎯[Jitsi] Connecting with Zulip config...");
+      log.info(`🎯[Jitsi] Options received: ${JSON.stringify(options)}`);
+      log.info(`🎯[Jitsi] SDK Available: ${jitsiSDKAvailable}`);
 
-    try {
-      // Проверяем готовность JitsiManager
-      const isReady = await jitsiManager.waitForReady(5000);
-      if (!isReady) {
-        log.error("🎯[Jitsi] JitsiManager not ready");
-        return { 
-          success: false, 
-          error: "JitsiManager not initialized",
-          fallbackToBrowser: true
-        };
-      }
+      try {
+          // Проверяем готовность JitsiManager
+          const isReady = await jitsiManager.waitForReady(5000);
+          if (!isReady) {
+              log.error("🎯[Jitsi] JitsiManager not ready");
+              return { 
+                  success: false, 
+                  error: "JitsiManager not initialized",
+                  fallbackToBrowser: true
+              };
+          }
 
-      // Если SDK недоступен, сразу возвращаем fallback
-      if (!jitsiSDKAvailable) {
-        log.info("🎯[Jitsi] SDK not available, returning fallback immediately");
-        return { 
-          success: false, 
-          error: "Jitsi SDK not installed",
-          fallbackToBrowser: true,
-          sdkNotAvailable: true
-        };
-      }
+          // Если SDK недоступен, сразу возвращаем fallback
+          if (!jitsiSDKAvailable) {
+              log.info("🎯[Jitsi] SDK not available, returning fallback immediately");
+              return { 
+                  success: false, 
+                  error: "Jitsi SDK not installed",
+                  fallbackToBrowser: true,
+                  sdkNotAvailable: true
+              };
+          }
 
-      // Создаем окно через JitsiManager
-      const result = await jitsiManager.createWindow({
-        roomName: options.roomName || '',
-        serverUrl: options.serverUrl || 'https://jitsi-connectrm.ru',
-        displayName: options.userInfo?.displayName || 'Guest',
-        email: options.userInfo?.email || '',
-        avatarUrl: options.userInfo?.avatarURL || '',
-        jwt: options.jwt || '',
-        configOverwrite: options.configOverwrite,
-        interfaceConfigOverwrite: options.interfaceConfigOverwrite
-      });
-      
-      if (result.success) {
-        log.info(`🎯[Jitsi] Conference window created successfully`);
-        
-        // Отправляем подтверждение обратно в Zulip
-        sendEventToZulip('jitsi-conference-ready', {
-          success: true,
-          roomName: options.roomName,
-          usingSDK: true
-        });
-        
-        return {
-          success: true,
-          usingSDK: true
-        };
-      } else {
-        log.error(`🎯[Jitsi] Failed to create window: ${result.error}`);
-        return { 
-          success: false, 
-          error: result.error || "Failed to create Jitsi window",
-          fallbackToBrowser: false,
-          retryable: true
-        };
+          const finalConfig = {
+              ...defaultJitsiConfig,
+              ...(options.configOverwrite || {})
+          };
+
+          const finalInterfaceConfig = {
+              ...defaultInterfaceConfig,
+              ...(options.interfaceConfigOverwrite || {})
+          };
+
+          // Создаем окно через JitsiManager
+          const result = await jitsiManager.createWindow({
+              roomName: options.roomName || '',
+              serverUrl: options.serverUrl || 'https://jitsi-connectrm.ru',
+              displayName: options.userInfo?.displayName || 'Guest',
+              email: options.userInfo?.email || '',
+              avatarUrl: options.userInfo?.avatarURL || '',
+              jwt: options.jwt || '',
+              configOverwrite: finalConfig,
+              interfaceConfigOverwrite: finalInterfaceConfig
+          });
+
+          // ВАЖНО: Сразу блокируем iframe в Zulip
+          const allContents = webContents.getAllWebContents();
+          for (const content of allContents) {
+              const url = content.getURL();
+              if (url && (url.includes('joinrm-svz') || url.includes('connectrm-svz'))) {
+                  // Инжектируем блокировщик iframe ДО создания окна SDK
+                  await content.executeJavaScript(`
+                      (function() {
+                          // Блокируем создание iframe немедленно
+                          window.JITSI_SDK_ACTIVE = true;
+                          window.jitsiSDKHandled = true;
+                          
+                          // Удаляем существующий iframe если есть
+                          const existingIframe = document.querySelector('iframe[src*="jitsi"]');
+                          if (existingIframe) {
+                              existingIframe.remove();
+                              console.log('[SDK] Removed existing Jitsi iframe');
+                          }
+                          
+                          // Останавливаем любые таймеры создания iframe
+                          if (window.jitsiIframeCreationTimer) {
+                              clearTimeout(window.jitsiIframeCreationTimer);
+                              window.jitsiIframeCreationTimer = null;
+                          }
+                          
+                          console.log('[SDK] Iframe creation blocked');
+                      })();
+                  `).catch(err => {
+                      log.error(`Failed to block iframe: ${err.message}`);
+                  });
+              }
+          }
+
+          if (result.success) {
+              log.info(`🎯[Jitsi] ✅ Conference window created successfully`);
+              
+              // Уведомляем Zulip что окно создано
+              sendEventToZulip('jitsi-conference-ready', {
+                  success: true,
+                  roomName: options.roomName,
+                  usingSDK: true,
+                  // ВАЖНО: Добавляем флаг что НЕ нужен iframe
+                  preventIframe: true
+              });
+              
+              // КРИТИЧНО: Отправляем сигнал остановки iframe
+              sendEventToZulip('jitsi-sdk-handled', {
+                  success: true,
+                  stopIframe: true
+              });
+              
+              // Завершаем загрузку
+              sendEventToZulip('jitsi-loading-finished', {
+                  success: true,
+                  usingSDK: true
+              });
+              
+              return {
+                  success: true,
+                  usingSDK: true,
+                  // НЕ возвращаем fallbackToBrowser когда SDK успешно работает!
+                  fallbackToBrowser: false,
+                  preventIframe: true
+              };
+          } else {
+              log.error(`🎯[Jitsi] ⌛ Failed to create window: ${result.error}`);
+              
+              // SDK есть но ошибка - НЕ разрешаем fallback
+              return { 
+                  success: false, 
+                  error: result.error || "Failed to create Jitsi window",
+                  fallbackToBrowser: false,
+                  retryable: true
+              };
+          }
+          
+      } catch (error: any) {
+          log.error(`🎯[Jitsi] Error: ${error.message}`);
+          
+          if (jitsiSDKAvailable) {
+              // Если SDK доступен, не делаем fallback на iframe
+              return { 
+                  success: false, 
+                  error: error.message,
+                  fallbackToBrowser: false,
+                  retryable: true
+              };
+          } else {
+              // Только если SDK недоступен - разрешаем iframe
+              return { 
+                  success: false, 
+                  error: error.message,
+                  fallbackToBrowser: true,
+                  sdkNotAvailable: true
+              };
+          }
       }
-      
-    } catch (error: any) {
-      log.error(`🎯[Jitsi] Error: ${error.message}`);
-      
-      if (jitsiSDKAvailable) {
-        return { 
-          success: false, 
-          error: error.message,
-          fallbackToBrowser: false,
-          retryable: true
-        };
-      } else {
-        return { 
-          success: false, 
-          error: error.message,
-          fallbackToBrowser: true,
-          sdkNotAvailable: true
-        };
-      }
-    }
+  });
+
+  ipcMain.handle("jitsi:check-window-status", async () => {
+      const status = await jitsiManager.getStatus();
+      return {
+          hasWindow: status.hasWindow,
+          isStreamActive: status.isStreamActive,
+          sdkAvailable: jitsiSDKAvailable,
+          shouldUseIframe: !jitsiSDKAvailable || !status.hasWindow
+      };
   });
 
   // Добавляем обработчик для проверки статуса SDK

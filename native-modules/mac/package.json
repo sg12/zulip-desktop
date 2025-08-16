@@ -1,23 +1,50 @@
 {
-  "name": "native-addon-mac",
+  "name": "screen-capture-webrtc-native",
   "version": "1.0.0",
-  "description": "macOS native screen capture module for Electron",
-  "main": "addon.node",
+  "description": "Native macOS screen capture with WebRTC for Electron (Universal Binary)",
+  "main": "index.js",
   "scripts": {
-    "build": "bash build.sh",
-    "build:direct": "bash build-for-electron-direct.sh",
-    "clean": "rm -rf build *.o *.node *-Swift.h swift_integrated_capture.mm",
-    "test": "node test-module.js"
+    "build": "./build-universal.sh",
+    "build:universal": "./build-universal.sh",
+    "build:intel": "./build-for-electron-direct.sh",
+    "build:arm": "FORCE_ARCH=arm64 ./build-for-electron-direct.sh",
+    "rebuild": "npm run build:universal",
+    "test": "node examples/test_addon_only.js",
+    "test:electron": "npx electron examples/electron-test-main.js",
+    "verify": "lipo -info addon.node",
+    "install": "npm run build:universal",
+    "postinstall": "npm run verify"
   },
   "dependencies": {
-    "node-addon-api": "^7.0.0"
+    "node-addon-api": "^7.1.1"
   },
   "devDependencies": {
+    "electron": "^32.3.3",
     "electron-rebuild": "^3.2.9"
   },
+  "files": [
+    "src/",
+    "scripts/",
+    "examples/",
+    "binding.gyp",
+    "build-universal.sh",
+    "build-for-electron-direct.sh",
+    "index.js",
+    "addon.node"
+  ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=16.0.0"
   },
-  "os": ["darwin"],
-  "cpu": ["x64", "arm64"]
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "binary": {
+    "napi_versions": [
+      8
+    ]
+  }
 }

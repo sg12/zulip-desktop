@@ -1,0 +1,55 @@
+name: Build Windows Native Module
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # Позволяет запускать вручную
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+    
+    - name: Install Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+    
+    - name: Install Visual Studio Build Tools
+      run: |
+        choco install visualstudio2022buildtools -y
+        choco install visualstudio2022-workload-nativedesktop -y
+    
+    - name: Install dependencies
+      run: |
+        npm install -g node-gyp
+        cd native-modules/win
+        npm install node-addon-api
+    
+    - name: Build native module
+      run: |
+        cd native-modules/win
+        node-gyp configure --msvs_version=2022
+        node-gyp build
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: windows-native-module
+        path: native-modules/win/build/Release/*.node
+    
+    - name: Create Release
+      if: github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: native-module-${{ github.run_number }}
+        files: native-modules/win/build/Release/*.node
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -61,6 +61,7 @@
     "test:native": "node scripts/test-native-addon.js",
     "test:electron": "electron test-electron-modules.js",
     "test:modules": "npm run test:native && npm run test:electron",
+    "test:win:exe": "set ELECTRON_ENABLE_LOGGING=1 && \"dist/Связь РМ Setup 5.26.2.exe\"",
     
     "// === УТИЛИТЫ ===": "",
     "reinstall": "rimraf node_modules && npm install",
@@ -159,9 +160,9 @@
       "icon": "build/icon.ico",
       "publisherName": [
         "ООО Цифровые Технологии Рм"
-      ],
-      "sign": "scripts/sign.js"
+      ]
     },
+    "npmRebuild": false, 
     "nsis": {
       "oneClick": false,
       "perMachine": false,
