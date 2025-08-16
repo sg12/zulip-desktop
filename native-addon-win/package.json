@@ -1,0 +1,21 @@
+{
+  "name": "windows-screen-capture",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "./build.sh",
+    "test": "wine64 node test.js",
+    "install": "node-gyp rebuild"
+  },
+  "dependencies": {
+    "node-addon-api": "^5.1.0",
+    "node-api-headers": "^1.5.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^9.0.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
+}

@@ -1,0 +1,23 @@
+{
+  "name": "native-addon-mac",
+  "version": "1.0.0",
+  "description": "macOS native screen capture module for Electron",
+  "main": "addon.node",
+  "scripts": {
+    "build": "bash build.sh",
+    "build:direct": "bash build-for-electron-direct.sh",
+    "clean": "rm -rf build *.o *.node *-Swift.h swift_integrated_capture.mm",
+    "test": "node test-module.js"
+  },
+  "dependencies": {
+    "node-addon-api": "^7.0.0"
+  },
+  "devDependencies": {
+    "electron-rebuild": "^3.2.9"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": ["darwin"],
+  "cpu": ["x64", "arm64"]
+}

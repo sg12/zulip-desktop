@@ -1,9 +1,66 @@
-# Dependency directory
+# ============ NATIVE MODULES - ВСЕ ВАРИАНТЫ ============
+# Старые директории (если остались)
+/native-addon/node_modules/
+/native-addon/build/
+/native-addon/*.node
+/native-addon/*.o
+
+/native-addon-win/node_modules/
+/native-addon-win/build/
+/native-addon-win/*.node
+/native-addon-win/*.o
+
+/native-addon-mac/node_modules/
+/native-addon-mac/build/
+/native-addon-mac/*.node
+/native-addon-mac/*.o
+
+# Новая структура
+/native-modules/mac/node_modules/
+/native-modules/mac/build/
+/native-modules/mac/*.o
+/native-modules/mac/*.node
+/native-modules/mac/*-Swift.h
+/native-modules/mac/swift_integrated_capture.mm
+
+/native-modules/win/node_modules/
+/native-modules/win/build/
+/native-modules/win/*.o
+/native-modules/win/*.node
+
+# Универсальное правило для ВСЕХ native-* папок
+native-*/node_modules/
+native-*/build/
+native-*/**/*.node
+native-*/**/*.o
+native-*/**/*.pdb
+native-*/**/*.lib
+native-*/**/*.exp
+native-*/**/package-lock.json
+
+# Dependency directories
 /node_modules/
 /native-addon/node_modules/
 
+# Native modules dependencies and build artifacts
+/native-modules/mac/node_modules/
+/native-modules/mac/build/
+/native-modules/mac/*.o
+/native-modules/mac/*.node
+/native-modules/mac/*-Swift.h
+/native-modules/mac/swift_integrated_capture.mm
+/native-modules/mac/CaptureModule.o
+/native-modules/mac/swift_integrated_capture.o
+
+/native-modules/win/node_modules/
+/native-modules/win/build/
+/native-modules/win/*.o
+/native-modules/win/*.node
+
 # npm cache directory
 .npm
+package-lock.json
+yarn.lock
 
 # transifexrc - if user prefers it to be in working tree
 .transifexrc
@@ -11,8 +68,9 @@
 # Compiled binary build directory
 /dist/
 /dist-electron/
+*.node
 
-#snap generated files
+# snap generated files
 snap/parts
 snap/prime
 snap/snap
@@ -26,19 +84,69 @@ log.txt
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+lerna-debug.log*
 
-// osx garbage
+# OS generated files
 *.DS_Store
 .DS_Store
+Thumbs.db
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
 
 # dotenv environment variables file
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
-# miscellaneous
+# IDE and editor files
 .idea
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.project
+.classpath
+.c9/
+*.sublime-workspace
+
+# Build configuration
 config.gypi
 
 # Test generated files
 # tests/package.json
+coverage/
+.nyc_output/
 
+# Python
 .python-version
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# Electron specific
+.electron-gyp/
+electron-builder.yml.backup
+
+# macOS build artifacts
+*.dSYM/
+*.xcodeproj/
+*.xcworkspace/
+
+# Windows build artifacts
+*.pdb
+*.ilk
+*.exp
+*.lib

@@ -1,0 +1,18 @@
+{
+  "name": "screen-capture-win",
+  "version": "1.0.0",
+  "description": "Windows screen capture native module",
+  "main": "build/screen_capture_win.node",
+  "scripts": {
+    "install": "cmake-js compile",
+    "build": "cmake-js compile",
+    "rebuild": "cmake-js rebuild",
+    "clean": "cmake-js clean"
+  },
+  "dependencies": {
+    "node-addon-api": "^5.0.0"
+  },
+  "devDependencies": {
+    "cmake-js": "^7.2.1"
+  }
+}

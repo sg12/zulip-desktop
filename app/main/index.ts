@@ -50,6 +50,7 @@ let JitsiMeetElectron: any = null;
         
 // В index.ts добавьте в начало файла:
 import * as fs from 'fs';
+import { nativeAddonWrapper } from "./native-addon-wrapper.js";
 
 // Создаем поток для записи логов
 const preloadLogStream = fs.createWriteStream(
@@ -372,64 +373,62 @@ async function createMainWindow(): Promise<BrowserWindow> {
   app.disableHardwareAcceleration();
   await app.whenReady();
 
-  try {
-    const possiblePaths = [
-        path.join(__dirname, 'native-addon.node'),
-        path.join(__dirname, '..', 'dist-electron', 'native-addon.node'),
-        path.join(process.cwd(), 'dist-electron', 'native-addon.node'),
-        '/Users/sg12/zulip-desktop/dist-electron/native-addon.node'
-    ];
-    
-    let addonPath: string | null = null;
-    for (const testPath of possiblePaths) {
-        if (require('fs').existsSync(testPath)) {
-        addonPath = testPath;
-        break;
-        }
-    }
-    
-    if (!addonPath) {
-        throw new Error(`Native addon not found in any of: ${possiblePaths.join(', ')}`);
-    }
-    
-    log.info(`Loading native addon from: ${addonPath}`);
-    screenCaptureAddon = require(addonPath);
-    log.info(`✅ Native addon loaded successfully`);
+  // ===== ИСПОЛЬЗУЕМ WRAPPER ВМЕСТО ПРЯМОЙ ЗАГРУЗКИ =====
+  
+  // Получаем статус wrapper
+  const wrapperStatus = nativeAddonWrapper.getStatus();
+  log.info('════════════════════════════════════════');
+  log.info('📦 Native Addon Wrapper Status:');
+  log.info(`  Platform: ${wrapperStatus.platform}`);
+  log.info(`  Loaded: ${wrapperStatus.loaded}`);
+  log.info(`  Path: ${wrapperStatus.path}`);
+  log.info(`  Available: ${wrapperStatus.available}`);
+  
+  if (wrapperStatus.hasMethods) {
+    log.info(`  Methods: ${wrapperStatus.methods.join(', ')}`);
+  }
+  log.info('════════════════════════════════════════');
 
-    if (screenCaptureAddon.testBasic) {
-        const result = screenCaptureAddon.testBasic();
-        log.info(`Basic test result: ${result}`);
+  // Тестируем addon если доступен
+  if (nativeAddonWrapper.isAvailable()) {
+    const addon = nativeAddonWrapper.getAddon();
+    if (addon && addon.testMethod) {
+      const testResult = addon.testMethod();
+      log.info(`✅ Native addon test: ${testResult}`);
     }
-    
-    // Тест addon
-    const testResult = screenCaptureAddon.testMethod();
-    log.info(`✅ Native addon test result: ${testResult}`);
-    
-    // Проверяем наличие метода
-    if (typeof screenCaptureAddon.getAvailableSources === 'function') {
-        log.info("✅ Native addon has getAvailableSources method");
-    } else {
-        log.warn("⚠️ Native addon missing getAvailableSources method");
-    }
-    
-  } catch (error: any) {
-        log.error(`❌ Failed to load native addon: ${error.message}`);
-        screenCaptureAddon = null;
+  } else {
+    log.warn('⚠️ Native addon not available, using mock implementation');
   }
 
-  const nativeCaptureManager = new NativeCaptureManager(screenCaptureAddon);
+  // ===== ИНИЦИАЛИЗИРУЕМ МЕНЕДЖЕРЫ =====
+  
+  // NativeCaptureManager автоматически получит addon из wrapper
+  const nativeCaptureManager = new NativeCaptureManager();
+  
+  // Проверяем здоровье native capture
+  const captureHealth = await nativeCaptureManager.testAddonHealth();
+  log.info('════════════════════════════════════════');
+  log.info('🏥 Native Capture Health Check:');
+  log.info(`  Healthy: ${captureHealth.healthy ? '✅' : '❌'}`);
+  log.info('Details:');
+  captureHealth.details.split('\n').forEach(line => {
+    log.info(`  ${line}`);
+  });
+  log.info('════════════════════════════════════════');
+
+  // Инициализируем JitsiManager
   const jitsiManager = new JitsiManager(
     nativeCaptureManager,
     bundlePath,
     iconPath(),
     {
-        videoQuality: 'MEDIUM',  // 720p для экономии ресурсов
-        useHybridMode: true,
-        enableDebugUI: process.env.NODE_ENV === 'development'
+      videoQuality: 'MEDIUM',  // 720p для экономии ресурсов
+      useHybridMode: true,
+      enableDebugUI: process.env.NODE_ENV === 'development'
     }
   );
 
-  
+  log.info('✅ JitsiManager initialized');
 
   // 2. ЗАТЕМ создаем сессию
   const ses = session.fromPartition("persist:webviewsession");
@@ -549,298 +548,193 @@ async function createMainWindow(): Promise<BrowserWindow> {
 
 
   ipcMain.handle("get-desktop-sources", async () => {
-    try {
-        log.info("🎯[NativeCapture] Getting desktop sources...");
-        
-        let formattedSources = [];
-        let sourceType = 'unknown';
-        
-        // Создаем маппинг для сохранения оригинальных ID
-        const sourceIdMapping = new Map();
-        
-        // Получаем источники из native addon
-        if (screenCaptureAddon && typeof screenCaptureAddon.getAvailableSources === 'function') {
-        try {
-            const nativeSources = await screenCaptureAddon.getAvailableSources();
-            log.info(`🎯[NativeCapture] Got ${nativeSources.length} native sources`);
-            
-            if (nativeSources.length > 0) {
-            sourceType = 'native';
-            
-            // Логируем первые несколько источников для отладки
-            nativeSources.slice(0, 3).forEach((source, i) => {
-                log.info(`  Native source ${i}: id=${source.id}, name=${source.name}, type=${source.type}`);
-            });
-            
-            formattedSources = nativeSources.map((source, index) => {
-                const type = source.type === 'window' ? 'window' : 'screen';
-                
-                // ВАЖНО: Сохраняем оригинальный ID от native addon
-                const originalId = source.id;
-                
-                // Создаем ID в формате Electron, но сохраняем оригинальный ID
-                let formattedId;
-                if (originalId && !isNaN(Number(originalId))) {
-                // Если ID - число, используем его напрямую
-                formattedId = `${type}:${originalId}:0`;
-                } else if (originalId) {
-                // Если ID - строка (например, com.microsoft.VSCode)
-                // Генерируем числовой ID для Electron формата
-                const numericId = Math.abs(originalId.toString().split('').reduce((a, b) => {
-                    a = ((a << 5) - a) + b.charCodeAt(0);
-                    return a & a;
-                }, 0));
-                formattedId = `${type}:${numericId}:0`;
-                
-                // Сохраняем маппинг
-                sourceIdMapping.set(formattedId, originalId);
-                } else {
-                // Fallback - генерируем случайный ID
-                const randomId = Math.floor(100000 + Math.random() * 900000);
-                formattedId = `${type}:${randomId}:0`;
-                }
-                
-                log.info(`  Formatted: ${formattedId} -> original: ${originalId}`);
-                
-                return {
-                id: formattedId,
-                name: `🎯 ${source.name || 'Source ' + index}`,
-                thumbnail: { 
-                    dataUrl: createSourceThumbnail(source) 
-                },
-                isNative: true,
-                sourceType: 'native',
-                originalId: originalId, // Сохраняем оригинальный ID
-                originalType: source.type
-                };
-            });
-            
-            // Сохраняем маппинг глобально для последующего использования
-            global.nativeSourceMapping = sourceIdMapping;
-            
-            log.info(`🎯[NativeCapture] Created source mapping with ${sourceIdMapping.size} entries`);
-            }
-            
-        } catch (error: any) {
-            log.error(`🎯[NativeCapture] Error getting native sources: ${error.message}`);
-        }
-        }
-        
-        // Если нет native источников, используем Electron
-        if (formattedSources.length === 0) {
-        log.info("No native sources, using Electron fallback");
-        const electronSources = await desktopCapturer.getSources({
-            types: ['screen', 'window'],
-            thumbnailSize: { width: 300, height: 200 }
-        });
-        
-        formattedSources = electronSources.map(source => ({
-            id: source.id,
-            name: source.name,
-            thumbnail: {
-            dataUrl: source.thumbnail.toDataURL()
-            },
-            isNative: false
-        }));
-        }
-        
-        return formattedSources;
-        
-    } catch (error: any) {
-        log.error(`🎯[NativeCapture] Error: ${error.message}`);
-        return [];
-    }
-    });
+      try {
+          log.info("🎯[Main] Getting desktop sources...");
+          
+          // Используем wrapper для получения источников
+          if (nativeAddonWrapper.isAvailable()) {
+              const addon = nativeAddonWrapper.getAddon();
+              if (addon && addon.getAvailableSources) {
+                  const sources = await addon.getAvailableSources();
+                  log.info(`🎯[Main] Got ${sources.length} native sources`);
+                  
+                  // Детальное логирование для отладки
+                  sources.forEach((source: any, index: number) => {
+                      log.info(`  Source ${index}: id="${source.id}", name="${source.name}", type="${source.type}"`);
+                  });
+                  
+                  if (sources.length > 0) {
+                      // Форматируем источники для Jitsi
+                      const formattedSources = sources.map((source: any, index: number) => {
+                          const isDisplay = source.type === 'screen' || source.type === 'display';
+                          const type = isDisplay ? 'screen' : 'window';
+                          
+                          // ВАЖНО: Правильный формат ID для Electron
+                          let electronId: string;
+                          
+                          if (source.id && source.id.includes(':')) {
+                              // ID уже в правильном формате
+                              electronId = source.id;
+                          } else if (source.id) {
+                              // Форматируем ID
+                              // Для экранов: screen:displayId:0
+                              // Для окон: window:windowId:0
+                              electronId = `${type}:${source.id}:0`;
+                          } else {
+                              // Генерируем ID
+                              electronId = `${type}:${1000 + index}:0`;
+                          }
+                          
+                          log.info(`  Formatted: ${source.name} -> ${electronId}`);
+                          
+                          return {
+                              id: electronId,
+                              name: source.name || `Source ${index}`,
+                              thumbnail: { 
+                                  dataUrl: createSourceThumbnail(source) 
+                              },
+                              isNative: true,
+                              sourceType: 'native',
+                              platform: 'darwin',
+                              originalId: source.id,
+                              type: type
+                          };
+                      });
+                      
+                      return formattedSources;
+                  }
+              }
+          }
+          
+          // Fallback на Electron desktopCapturer
+          log.info("[Main] Fallback to Electron desktopCapturer");
+          const { desktopCapturer } = require('electron');
+          const electronSources = await desktopCapturer.getSources({
+              types: ['screen', 'window'],
+              thumbnailSize: { width: 300, height: 200 }
+          });
+          
+          log.info(`[Main] Got ${electronSources.length} Electron sources`);
+          
+          return electronSources.map(source => {
+              log.info(`  Electron source: ${source.name} -> ${source.id}`);
+              return {
+                  id: source.id,
+                  name: source.name,
+                  thumbnail: {
+                      dataUrl: source.thumbnail.toDataURL()
+                  },
+                  isNative: false,
+                  platform: process.platform
+              };
+          });
+          
+      } catch (error: any) {
+          log.error(`🎯[Main] Error getting sources: ${error.message}`);
+          log.error(error.stack);
+          return [];
+      }
+  });
 
 
   ipcMain.handle("jitsi-connect-with-zulip-config", async (event, options) => {
-      log.info("🎯[Jitsi] Connecting with Zulip config...");
-      log.info(`🎯[Jitsi] Options received: ${JSON.stringify(options)}`);
-      log.info(`🎯[Jitsi] SDK Available: ${jitsiSDKAvailable}`);
+    log.info("🎯[Jitsi] Connecting with Zulip config...");
+    log.info(`🎯[Jitsi] Options received: ${JSON.stringify(options)}`);
+    log.info(`🎯[Jitsi] SDK Available: ${jitsiSDKAvailable}`);
 
-      try {
-          // ВАЖНО: Если SDK недоступен, сразу возвращаем fallback
-          if (!jitsiSDKAvailable) {
-              log.info("🎯[Jitsi] SDK not available, returning fallback immediately");
-              return { 
-                  success: false, 
-                  error: "Jitsi SDK not installed",
-                  fallbackToBrowser: true,
-                  sdkNotAvailable: true
-              };
-          }
-
-          // Если SDK доступен, НЕ разрешаем fallback
-          log.info("🎯[Jitsi] SDK is available, attempting to create window...");
-          
-          // Добавляем индикатор загрузки в Zulip
-          sendEventToZulip('jitsi-loading-started', {
-              message: 'Запуск Jitsi конференции...'
-          });
-
-          // Формируем конфигурацию с нужными параметрами
-          const jitsiConfig = {
-              prejoinConfig: { enabled: false },
-              disableSimulcast: true,
-              startWithVideoMuted: true,
-              startWithAudioMuted: false,
-              disableAudioLevels: false,
-              stereo: false,
-              echoCancellation: true,
-              noiseSuppression: true,
-              highpassFilter: true,
-              autoGainControl: true,
-              enableLipSync: false,
-              audioProcessing: {
-                  autoGainControl: true,
-                  echoCancellation: true,
-                  noiseSuppression: true,
-                  highpassFilter: true
-              },
-              hideConferenceSubject: true,
-              deeplinking: {
-                  disabled: true
-              },
-              resolution: 720,
-              disableRemoteMute: true,
-              disableKick: true,
-              disableGrantModerator: true,
-              disablePrivateChat: true,
-              disableSelfViewSettings: true,
-              disableLocalVideoFlip: true,
-              disableLocalStats: true,
-              disableAVModeration: true,
-              disableInviteFunctions: true,
-              participantsPane: {
-                  hideMoreActionsButton: true
-              },
-              breakoutRooms: {
-                  hideMoreActionsButton: true
-              },
-              filmstrip: {
-                  disableStageFilmstrip: true,
-                  disableResizable: true
-              },
-              // Logging настройки
-              apiLogLevels: ['error'],
-              logging: {
-                  defaultLogLevel: 'error',
-                  loggers: {
-                      'modules/RTC/TraceablePeerConnection.js': 'error',
-                      'modules/statistics/CallStats.js': 'error',
-                      'modules/xmpp/strophe.util.js': 'error',
-                      'modules/statistics/LocalStatsCollector.js': 'error'
-                  }
-              }
-          };
-
-          const interfaceConfig = {
-              DISABLE_VIDEO_BACKGROUND: true,
-              DISABLE_DOMINANT_SPEAKER_INDICATOR: true,
-              TOOLBAR_BUTTONS: [
-                  'camera',
-                  'desktop',
-                  'microphone',
-                  'settings',
-                  'fullscreen',
-                  'hangup'
-              ]
-          };
-
-          // Используем JitsiManager для создания окна с конфигурацией
-          const result = await jitsiManager.createWindow({
-              roomName: options.roomName || '',
-              serverUrl: options.serverUrl || 'https://jitsi-connectrm.ru',
-              displayName: options.userInfo?.displayName || 'Guest',
-              email: options.userInfo?.email || '',
-              avatarUrl: options.userInfo?.avatarURL || '',
-              jwt: options.jwt || '',
-              configOverwrite: jitsiConfig,
-              interfaceConfigOverwrite: interfaceConfig
-          });
-          
-          if (result.success) {
-              log.info(`🎯[Jitsi] Conference window created successfully`);
-              
-              // Убираем индикатор загрузки
-              sendEventToZulip('jitsi-loading-finished', {
-                  success: true
-              });
-              
-              // Отправляем подтверждение обратно в Zulip
-              setTimeout(() => {
-                  sendEventToZulip('jitsi-conference-ready', {
-                      success: true,
-                      roomName: options.roomName,
-                      usingSDK: true
-                  });
-              }, 1000);
-              
-              // ВАЖНО: НЕ возвращаем fallbackToBrowser при успехе
-              return {
-                  success: true,
-                  usingSDK: true
-              };
-          } else {
-              // Если создание окна не удалось, но SDK есть - пробуем еще раз
-              log.error(`🎯[Jitsi] Failed to create window, but SDK is available`);
-              
-              // Убираем индикатор загрузки
-              sendEventToZulip('jitsi-loading-finished', {
-                  success: false,
-                  error: result.error
-              });
-              
-              // ВАЖНО: НЕ разрешаем fallback, если SDK установлен
-              return { 
-                  success: false, 
-                  error: result.error || "Failed to create Jitsi window",
-                  fallbackToBrowser: false, // Запрещаем fallback
-                  retryable: true // Указываем, что можно повторить попытку
-              };
-          }
-          
-      } catch (error: any) {
-          log.error(`🎯[Jitsi] Error: ${error.message}`);
-          
-          // Убираем индикатор загрузки
-          sendEventToZulip('jitsi-loading-finished', {
-              success: false,
-              error: error.message
-          });
-          
-          // Если SDK установлен, НЕ разрешаем fallback даже при ошибке
-          if (jitsiSDKAvailable) {
-              log.info("🎯[Jitsi] Error occurred but SDK is available, NOT allowing fallback");
-              return { 
-                  success: false, 
-                  error: error.message,
-                  fallbackToBrowser: false, // Запрещаем fallback
-                  retryable: true
-              };
-          } else {
-              // Только если SDK точно недоступен
-              return { 
-                  success: false, 
-                  error: error.message,
-                  fallbackToBrowser: true,
-                  sdkNotAvailable: true
-              };
-          }
+    try {
+      // Проверяем готовность JitsiManager
+      const isReady = await jitsiManager.waitForReady(5000);
+      if (!isReady) {
+        log.error("🎯[Jitsi] JitsiManager not ready");
+        return { 
+          success: false, 
+          error: "JitsiManager not initialized",
+          fallbackToBrowser: true
+        };
       }
+
+      // Если SDK недоступен, сразу возвращаем fallback
+      if (!jitsiSDKAvailable) {
+        log.info("🎯[Jitsi] SDK not available, returning fallback immediately");
+        return { 
+          success: false, 
+          error: "Jitsi SDK not installed",
+          fallbackToBrowser: true,
+          sdkNotAvailable: true
+        };
+      }
+
+      // Создаем окно через JitsiManager
+      const result = await jitsiManager.createWindow({
+        roomName: options.roomName || '',
+        serverUrl: options.serverUrl || 'https://jitsi-connectrm.ru',
+        displayName: options.userInfo?.displayName || 'Guest',
+        email: options.userInfo?.email || '',
+        avatarUrl: options.userInfo?.avatarURL || '',
+        jwt: options.jwt || '',
+        configOverwrite: options.configOverwrite,
+        interfaceConfigOverwrite: options.interfaceConfigOverwrite
+      });
+      
+      if (result.success) {
+        log.info(`🎯[Jitsi] Conference window created successfully`);
+        
+        // Отправляем подтверждение обратно в Zulip
+        sendEventToZulip('jitsi-conference-ready', {
+          success: true,
+          roomName: options.roomName,
+          usingSDK: true
+        });
+        
+        return {
+          success: true,
+          usingSDK: true
+        };
+      } else {
+        log.error(`🎯[Jitsi] Failed to create window: ${result.error}`);
+        return { 
+          success: false, 
+          error: result.error || "Failed to create Jitsi window",
+          fallbackToBrowser: false,
+          retryable: true
+        };
+      }
+      
+    } catch (error: any) {
+      log.error(`🎯[Jitsi] Error: ${error.message}`);
+      
+      if (jitsiSDKAvailable) {
+        return { 
+          success: false, 
+          error: error.message,
+          fallbackToBrowser: false,
+          retryable: true
+        };
+      } else {
+        return { 
+          success: false, 
+          error: error.message,
+          fallbackToBrowser: true,
+          sdkNotAvailable: true
+        };
+      }
+    }
   });
 
   // Добавляем обработчик для проверки статуса SDK
   ipcMain.handle("check-jitsi-sdk-status", async () => {
-      log.info(`🎯[Jitsi] SDK Status check: ${jitsiSDKAvailable ? 'AVAILABLE' : 'NOT AVAILABLE'}`);
-      
-      return {
-          sdkAvailable: jitsiSDKAvailable,
-          jitsiManagerReady: !!jitsiManager,
-          message: jitsiSDKAvailable 
-              ? "Jitsi SDK установлен и готов к использованию" 
-              : "Jitsi SDK не установлен, будет использован iframe"
-      };
+    log.info(`🎯[Jitsi] SDK Status check: ${jitsiSDKAvailable ? 'AVAILABLE' : 'NOT AVAILABLE'}`);
+    
+    return {
+      sdkAvailable: jitsiSDKAvailable,
+      jitsiManagerReady: jitsiManager.isReady(),
+      nativeAddonAvailable: nativeAddonWrapper.isAvailable(),
+      platform: nativeAddonWrapper.getPlatform(),
+      message: jitsiSDKAvailable 
+        ? "Jitsi SDK установлен и готов к использованию" 
+        : "Jitsi SDK не установлен, будет использован iframe"
+    };
   });
 
   // Добавляем обработчик для повторной попытки
@@ -860,6 +754,20 @@ async function createMainWindow(): Promise<BrowserWindow> {
       
       // Повторяем попытку создания окна
       return ipcMain.handle("jitsi-connect-with-zulip-config", event, options);
+  });
+
+  ipcMain.handle("test-native-capture", async () => {
+    log.info("🧪[Test] Testing native capture...");
+    
+    const status = {
+      wrapperAvailable: nativeAddonWrapper.isAvailable(),
+      wrapperStatus: nativeAddonWrapper.getStatus(),
+      captureManagerReady: nativeCaptureManager.isAvailable,
+      captureHealth: await nativeCaptureManager.testAddonHealth()
+    };
+    
+    log.info("🧪[Test] Native capture status:", status);
+    return status;
   });
 
   // Обработчики событий от Jitsi окна

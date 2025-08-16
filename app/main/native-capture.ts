@@ -3,6 +3,7 @@ import { app, BrowserWindow, ipcMain, webContents } from "electron";
 import * as path from "path";
 import * as fs from "fs";
 import log from "electron-log";
+import { nativeAddonWrapper } from "./native-addon-wrapper";
 
 interface NativeCaptureState {
   addon: any;
@@ -72,19 +73,44 @@ export class NativeCaptureManager {
     private currentQuality: CaptureQuality = CAPTURE_PRESETS.ULTRALOW.quality;
 
     constructor(addon?: any) {
-        this.state = {
-          addon: addon || null, // Используем переданный addon
-          isCapturing: false,
-          currentSourceId: null,
-          videoFrameCount: 0,
-          audioFrameCount: 0,
-          callbacks: {}
-      };
+            this.state = {
+            addon: addon || null, // Используем переданный addon
+            isCapturing: false,
+            currentSourceId: null,
+            videoFrameCount: 0,
+            audioFrameCount: 0,
+            callbacks: {}
+        };
 
-      if (!addon) {
-          this.loadAddon(); // Загружаем только если не передан
-      }
-      this.registerHandlers();
+        if (!addon) {
+            // Пробуем получить из wrapper
+            if (nativeAddonWrapper.isAvailable()) {
+                    addon = nativeAddonWrapper.getAddon();
+                    const status = nativeAddonWrapper.getStatus();
+                    log.info(`[NativeCaptureManager] Using addon from wrapper`);
+                    log.info(`[NativeCaptureManager] Platform: ${status.platform}`);
+                    log.info(`[NativeCaptureManager] Methods available: ${status.methodCount}`);
+            }
+        }
+            
+        this.state = {
+            addon: addon || null,
+            isCapturing: false,
+            currentSourceId: null,
+            videoFrameCount: 0,
+            audioFrameCount: 0,
+            callbacks: {}
+        };
+
+        if (!addon) {
+            this.loadAddon(); // Загружаем только если не передан
+        }
+        this.registerHandlers();
+
+        // Проверяем здоровье addon
+        this.testAddonHealth().then(health => {
+            log.info(`[NativeCaptureManager] Health check: ${health.healthy ? '✅' : '❌'}`);
+        });
     }
 
     // В native-capture.ts добавьте метод для audio-only режима

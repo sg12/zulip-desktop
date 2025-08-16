@@ -1,0 +1,6 @@
+{
+  "name": "windows-screen-capture",
+  "version": "1.0.0",
+  "main": "index.js",
+  "description": "Screen capture module for Windows (Electron)"
+}
