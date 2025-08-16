@@ -21,10 +21,10 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4  # Обновлено с v3 на v4
+      uses: actions/checkout@v4
     
     - name: Setup Node.js
-      uses: actions/setup-node@v4  # Обновлено с v3 на v4
+      uses: actions/setup-node@v4
       with:
         node-version: '18'
     
@@ -34,8 +34,13 @@ jobs:
         
     - name: Create native module directory
       run: |
-        mkdir -p native-modules/win/src
-        mkdir -p native-modules/win/build
+        # PowerShell way to create directories
+        if (!(Test-Path "native-modules/win/src")) {
+            New-Item -ItemType Directory -Force -Path "native-modules/win/src"
+        }
+        if (!(Test-Path "native-modules/win/build")) {
+            New-Item -ItemType Directory -Force -Path "native-modules/win/build"
+        }
         
     - name: Create simple test module
       run: |
@@ -109,6 +114,30 @@ jobs:
             return result;
         }
         
+        // SetCaptureSource функция
+        napi_value SetCaptureSource(napi_env env, napi_callback_info info) {
+            napi_value result;
+            napi_create_object(env, &result);
+            
+            napi_value success;
+            napi_get_boolean(env, true, &success);
+            napi_set_named_property(env, result, "success", success);
+            
+            return result;
+        }
+        
+        // SetCaptureQuality функция
+        napi_value SetCaptureQuality(napi_env env, napi_callback_info info) {
+            napi_value result;
+            napi_create_object(env, &result);
+            
+            napi_value success;
+            napi_get_boolean(env, true, &success);
+            napi_set_named_property(env, result, "success", success);
+            
+            return result;
+        }
+        
         // Заглушки для callbacks
         napi_value SetWebRTCAudioCallback(napi_env env, napi_callback_info info) {
             return nullptr;
@@ -125,6 +154,8 @@ jobs:
                 {"getAvailableSources", nullptr, GetAvailableSources, nullptr, nullptr, nullptr, napi_default, nullptr},
                 {"startCapture", nullptr, StartCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
                 {"stopCapture", nullptr, StopCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
+                {"setCaptureSource", nullptr, SetCaptureSource, nullptr, nullptr, nullptr, napi_default, nullptr},
+                {"setCaptureQuality", nullptr, SetCaptureQuality, nullptr, nullptr, nullptr, napi_default, nullptr},
                 {"setWebRTCAudioCallback", nullptr, SetWebRTCAudioCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
                 {"setWebRTCVideoCallback", nullptr, SetWebRTCVideoCallback, nullptr, nullptr, nullptr, napi_default, nullptr}
             };
@@ -136,6 +167,20 @@ jobs:
         NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
         '@ | Out-File -Encoding UTF8 native-modules/win/src/test_module.cpp
         
+    - name: Create package.json for module
+      run: |
+        @'
+        {
+          "name": "screen-capture-win",
+          "version": "1.0.0",
+          "description": "Windows screen capture native module",
+          "main": "build/Release/screen_capture_win.node",
+          "scripts": {
+            "build": "node-gyp rebuild"
+          }
+        }
+        '@ | Out-File -Encoding UTF8 native-modules/win/package.json
+        
     - name: Create binding.gyp
       run: |
         @'
@@ -144,7 +189,14 @@ jobs:
             {
               "target_name": "screen_capture_win",
               "sources": [ "src/test_module.cpp" ],
-              "defines": [ "NAPI_DISABLE_CPP_EXCEPTIONS" ]
+              "defines": [ "NAPI_DISABLE_CPP_EXCEPTIONS" ],
+              "cflags!": [ "-fno-exceptions" ],
+              "cflags_cc!": [ "-fno-exceptions" ],
+              "msvs_settings": {
+                "VCCLCompilerTool": {
+                  "ExceptionHandling": 0
+                }
+              }
             }
           ]
         }
@@ -153,29 +205,46 @@ jobs:
     - name: Build native module
       run: |
         cd native-modules/win
-        npm init -y
         node-gyp configure
         node-gyp build
         
     - name: List built files
       run: |
         echo "=== Built files ==="
-        dir native-modules\win\build\Release\
+        Get-ChildItem -Path "native-modules\win\build\Release\" -Recurse | Format-Table Name, Length, LastWriteTime
         
-    - name: Test module
+    - name: Test module loading
       run: |
-        node -e "try { const m = require('./native-modules/win/build/Release/screen_capture_win.node'); console.log('Module loaded!'); console.log('Test:', m.testMethod()); } catch(e) { console.log('Error:', e.message); }"
+        $modulePath = ".\native-modules\win\build\Release\screen_capture_win.node"
+        if (Test-Path $modulePath) {
+            Write-Host "Module file exists: $modulePath"
+            Write-Host "File size: $((Get-Item $modulePath).Length) bytes"
+            
+            # Try to load module
+            node -e "try { const m = require('./native-modules/win/build/Release/screen_capture_win.node'); console.log('SUCCESS: Module loaded!'); console.log('Test method:', m.testMethod ? m.testMethod() : 'no testMethod'); console.log('Available methods:', Object.keys(m)); } catch(e) { console.log('ERROR:', e.message); console.log('Stack:', e.stack); }"
+        } else {
+            Write-Host "ERROR: Module file not found at $modulePath"
+            exit 1
+        }
         
     - name: Upload module
-      uses: actions/upload-artifact@v4  # Обновлено с v3 на v4
+      uses: actions/upload-artifact@v4
       with:
         name: windows-native-audio-module
         path: |
           native-modules/win/build/Release/*.node
           
+    - name: Upload build logs if failed
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: |
+          native-modules/win/build/
+          
     - name: Create Release
-      if: github.event_name == 'push'
-      uses: softprops/action-gh-release@v2  # Обновлено на v2
+      if: success() && github.event_name == 'push'
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: audio-module-build-${{ github.run_number }}
         name: Audio Module Build ${{ github.run_number }}
