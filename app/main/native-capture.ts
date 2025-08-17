@@ -127,7 +127,7 @@ export class NativeCaptureManager {
             log.info("[NATIVE-CAPTURE] Starting AUDIO-ONLY capture (optimized)");
             log.info(`[NATIVE-CAPTURE] Raw sourceId: ${sourceId}`);
             
-            // Парсим sourceId
+            // ВОЗВРАЩАЕМ СТАРЫЙ ПАРСИНГ (который работал)
             let sourceType = 'display';
             let realSourceId = sourceId;
             
@@ -141,6 +141,8 @@ export class NativeCaptureManager {
                     realSourceId = parts[1];
                 }
             }
+
+            realSourceId = realSourceId.split(':')[0];  // Убираем :0 если есть
             
             log.info(`[NATIVE-CAPTURE] Parsed - type: '${sourceType}', id: '${realSourceId}'`);
             
@@ -501,6 +503,41 @@ export class NativeCaptureManager {
         return { healthy, details };
     }
 
+    private parseElectronSourceId(electronSourceId: string): { type: string; id: string } {
+        // Electron форматы:
+        // - screen:2077748985:0 -> display, 2077748985
+        // - window:70:0 -> window, 70
+        
+        let sourceType = 'display';
+        let numericId = electronSourceId;
+        
+        if (electronSourceId.includes(':')) {
+            const parts = electronSourceId.split(':');
+            
+            // Определяем тип
+            if (parts[0] === 'screen') {
+                sourceType = 'display';
+            } else if (parts[0] === 'window') {
+                sourceType = 'window';
+            }
+            
+            // Извлекаем числовой ID (второй элемент)
+            if (parts.length >= 2) {
+                numericId = parts[1];
+            }
+        }
+        
+        // Убеждаемся что это только число
+        const match = numericId.match(/^\d+/);
+        if (match) {
+            numericId = match[0];
+        }
+        
+        log.info(`[NATIVE-CAPTURE] Parsed Electron ID '${electronSourceId}' -> type: '${sourceType}', id: '${numericId}'`);
+        
+        return { type: sourceType, id: numericId };
+    }
+
     async startCapture(sourceId: string): Promise<{ success: boolean; error?: string }> {
         if (!this.state.addon) {
             return { success: false, error: "Native addon not loaded" };
@@ -515,22 +552,24 @@ export class NativeCaptureManager {
             let sourceType = 'display';
             let realSourceId = sourceId;
             
-            log.info(`Raw sourceId: '${sourceId}'`);
-            
             if (sourceId.includes(':')) {
                 const parts = sourceId.split(':');
-                log.info(`Split parts: ${JSON.stringify(parts)}`);
                 
-                if (parts[0] === 'screen' && parts.length >= 2) {
-                    sourceType = 'display';
-                    realSourceId = parts[1];
-                } else if (parts[0] === 'window') {
-                    sourceType = 'window';
-                    realSourceId = parts[1];
+                if (parts.length >= 2) {
+                    if (parts[0] === 'screen') {
+                        sourceType = 'display';
+                        realSourceId = parts[1]; // Только число, без :0
+                    } else if (parts[0] === 'window') {
+                        sourceType = 'window';
+                        realSourceId = parts[1]; // Только число, без :0
+                    }
                 }
             }
             
-            log.info(`Parsed - type: '${sourceType}', id: '${realSourceId}'`);
+            // Очищаем от нечисловых символов
+            realSourceId = realSourceId.replace(/[^0-9]/g, '');
+            
+            log.info(`[NATIVE-CAPTURE] Parsed - type: '${sourceType}', id: '${realSourceId}'`);
             log.info(`Current quality settings: ${JSON.stringify(this.currentQuality)}`);
             
             // Сбрасываем счетчики
@@ -830,12 +869,16 @@ export class NativeCaptureManager {
             this.state.audioFrameCount++;
             
             if (this.state.audioFrameCount === 1) {
-                log.info("First audio frame:", {
+                log.info("[STREAM-ELECTRON] First audio frame from Swift:", {
                     hasData: !!audioData?.data,
+                    dataType: typeof audioData?.data,
                     dataByteLength: audioData?.data?.byteLength,
                     sampleRate: audioData?.sampleRate,
                     channels: audioData?.channels,
-                    source: audioData?.source
+                    source: audioData?.source,
+                    // Проверяем первые байты
+                    firstBytes: audioData?.data ? 
+                        Array.from(new Uint8Array(audioData.data).slice(0, 20)) : null
                 });
             }
             

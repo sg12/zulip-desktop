@@ -13,7 +13,6 @@ interface JitsiOptions {
   avatarUrl?: string;
   jwt?: string;
   configOverwrite?: any;
-  interfaceConfigOverwrite?: any;
 }
 
 interface JitsiState {
@@ -452,17 +451,17 @@ export class JitsiManager {
             url += '?' + queryParams.toString();
         }
 
-        // Формируем параметры для hash
+        // Формируем параметры для hash - только базовые настройки SDK
         const hashParams = new URLSearchParams();
         
-        // Базовые настройки
+        // Базовые настройки SDK
         hashParams.append('config.prejoinPageEnabled', 'false');
         hashParams.append('config.startWithAudioMuted', 'false');
         hashParams.append('config.startWithVideoMuted', 'true');
         
-        // Применяем настройки из configOverwrite
+        // Применяем настройки из configOverwrite для SDK
         if (options.configOverwrite) {
-            // Logging настройки
+            // Настройки логирования
             hashParams.append('config.apiLogLevels', JSON.stringify(['error']));
             hashParams.append('config.logging.defaultLogLevel', 'error');
             
@@ -471,61 +470,19 @@ export class JitsiManager {
             hashParams.append('config.stereo', 'false');
             hashParams.append('config.echoCancellation', 'true');
             hashParams.append('config.noiseSuppression', 'true');
-            hashParams.append('config.highpassFilter', 'true');
-            hashParams.append('config.autoGainControl', 'true');
-            hashParams.append('config.enableLipSync', 'false');
             
-            // UI настройки
-            hashParams.append('config.hideConferenceSubject', 'true');
+            // Видео настройки
+            hashParams.append('config.resolution', '720');
+            
+            // Отключаем ненужные функции
             hashParams.append('config.disableSimulcast', 'true');
             hashParams.append('config.deeplinking.disabled', 'true');
-            
-            // Модерация и права
             hashParams.append('config.disableRemoteMute', 'true');
-            hashParams.append('config.disableKick', 'true');
-            hashParams.append('config.disableGrantModerator', 'true');
-            hashParams.append('config.disablePrivateChat', 'true');
-            hashParams.append('config.disableAVModeration', 'true');
-            hashParams.append('config.disableInviteFunctions', 'true');
-            
-            // Настройки видео
-            hashParams.append('config.resolution', '720');
-            hashParams.append('config.disableSelfViewSettings', 'true');
-            hashParams.append('config.disableLocalVideoFlip', 'true');
-            hashParams.append('config.disableLocalStats', 'true');
-            
-            // Filmstrip
-            hashParams.append('config.filmstrip.disableStageFilmstrip', 'true');
-            hashParams.append('config.filmstrip.disableResizable', 'true');
-            
-            // Participants pane
-            hashParams.append('config.participantsPane.hideMoreActionsButton', 'true');
-            
-            // Breakout rooms
-            hashParams.append('config.breakoutRooms.hideMoreActionsButton', 'true');
-        }
-        
-        // Применяем настройки интерфейса
-        if (options.interfaceConfigOverwrite) {
-            hashParams.append('interfaceConfig.DISABLE_VIDEO_BACKGROUND', 'true');
-            hashParams.append('interfaceConfig.DISABLE_DOMINANT_SPEAKER_INDICATOR', 'true');
-            
-            // Toolbar buttons
-            const toolbarButtons = [
-                'camera',
-                'desktop',
-                'microphone', 
-                'settings',
-                'fullscreen',
-                'hangup'
-            ];
-            hashParams.append('interfaceConfig.TOOLBAR_BUTTONS', JSON.stringify(toolbarButtons));
         }
         
         // User info
         if (options.displayName) hashParams.append('userInfo.displayName', options.displayName);
         if (options.email) hashParams.append('userInfo.email', options.email);
-        if (options.avatarUrl) hashParams.append('userInfo.avatarURL', options.avatarUrl);
         
         if (hashParams.toString()) {
             url += '#' + hashParams.toString();
@@ -548,7 +505,7 @@ export class JitsiManager {
                 return;
             }
 
-            // Инжектируем монитор
+            // Инжектируем монитор демонстрации экрана
             const monitor = new JitsiScreenShareMonitor();
             await monitor.injectMonitor(this.state.window);
             
@@ -557,10 +514,10 @@ export class JitsiManager {
                 ${this.getScreenShareInterceptorCode()}
             `);
             
-            // Инжектируем обработчики событий конференции
+            // Инжектируем обработчики событий конференции (только SDK)
             await this.injectConferenceEventHandlers();
 
-            log.info("✅ Handlers injected successfully");
+            log.info("✅ SDK handlers injected successfully");
 
         } catch (error: any) {
             log.error(`Failed to inject handlers: ${error.message}`);
@@ -940,44 +897,143 @@ export class JitsiManager {
                                 this.readIndex = 0;
                                 this.availableSamples = 0;
                                 this.size = size;
+                                this.totalWritten = 0;
+                                this.totalRead = 0;
                             }
+                            
                             write(data) {
-                                for (let i = 0; i < data.length; i++) {
+                                const samplesToWrite = data.length;
+                                
+                                for (let i = 0; i < samplesToWrite; i++) {
                                     this.buffer[this.writeIndex] = data[i];
                                     this.writeIndex = (this.writeIndex + 1) % this.size;
-                                    this.availableSamples = Math.min(this.availableSamples + 1, this.size);
+                                }
+                                
+                                // Важно: правильно обновляем availableSamples
+                                this.availableSamples = Math.min(this.availableSamples + samplesToWrite, this.size);
+                                this.totalWritten += samplesToWrite;
+                                
+                                // Если буфер переполнен, сдвигаем readIndex
+                                if (this.availableSamples === this.size) {
+                                    const overflow = samplesToWrite;
+                                    this.readIndex = (this.readIndex + overflow) % this.size;
                                 }
                             }
+                            
                             read(output) {
                                 const samplesToRead = Math.min(output.length, this.availableSamples);
+                                
+                                if (samplesToRead === 0) {
+                                    // Нет данных - заполняем тишиной
+                                    output.fill(0);
+                                    return 0;
+                                }
+                                
                                 for (let i = 0; i < samplesToRead; i++) {
                                     output[i] = this.buffer[this.readIndex];
                                     this.readIndex = (this.readIndex + 1) % this.size;
                                 }
+                                
+                                // Заполняем остаток тишиной если не хватило данных
                                 for (let i = samplesToRead; i < output.length; i++) {
                                     output[i] = 0;
                                 }
-                                this.availableSamples = Math.max(0, this.availableSamples - samplesToRead);
+                                
+                                this.availableSamples -= samplesToRead;
+                                this.totalRead += samplesToRead;
+                                
                                 return samplesToRead;
                             }
+                            
+                            getStatus() {
+                                return {
+                                    available: this.availableSamples,
+                                    writeIndex: this.writeIndex,
+                                    readIndex: this.readIndex,
+                                    totalWritten: this.totalWritten,
+                                    totalRead: this.totalRead,
+                                    bufferSize: this.size
+                                };
+                            }
                         }
-                        
-                        const leftRingBuffer = new RingBuffer(48000);
-                        const rightRingBuffer = new RingBuffer(48000);
-                        
+
+                        // Увеличиваем размер буфера для лучшей буферизации
+                        const bufferSize = 48000 * 2; // 2 секунды буфера
+                        const leftRingBuffer = new RingBuffer(bufferSize);
+                        const rightRingBuffer = new RingBuffer(bufferSize);
+
+                        // Улучшенный onaudioprocess
                         scriptProcessor.onaudioprocess = (event) => {
                             if (!window.isNativeActive) {
                                 event.outputBuffer.getChannelData(0).fill(0);
                                 event.outputBuffer.getChannelData(1).fill(0);
                                 return;
                             }
-                            leftRingBuffer.read(event.outputBuffer.getChannelData(0));
-                            rightRingBuffer.read(event.outputBuffer.getChannelData(1));
+                            
+                            const leftOutput = event.outputBuffer.getChannelData(0);
+                            const rightOutput = event.outputBuffer.getChannelData(1);
+                            
+                            const leftSamples = leftRingBuffer.read(leftOutput);
+                            const rightSamples = rightRingBuffer.read(rightOutput);
+                            
+                            // Диагностика
+                            if (!window.audioProcessCount) {
+                                window.audioProcessCount = 0;
+                            }
+                            window.audioProcessCount++;
+                            
+                            if (window.audioProcessCount <= 10 || window.audioProcessCount % 100 === 0) {
+                                const leftStatus = leftRingBuffer.getStatus();
+                                const rightStatus = rightRingBuffer.getStatus();
+                                
+                                // ВАЖНО: Используем JSON.stringify для правильного вывода
+                                console.log('[STREAM-ELECTRON] Audio process', window.audioProcessCount, 
+                                    JSON.stringify({
+                                        samplesRead: leftSamples,
+                                        leftBuffer: leftStatus.available,
+                                        rightBuffer: rightStatus.available,
+                                        totalWritten: leftStatus.totalWritten,
+                                        totalRead: leftStatus.totalRead
+                                    })
+                                );
+                                
+                                // Проверяем выходные данные
+                                let maxLeft = 0, maxRight = 0;
+                                for (let i = 0; i < Math.min(100, leftOutput.length); i++) {
+                                    maxLeft = Math.max(maxLeft, Math.abs(leftOutput[i]));
+                                    maxRight = Math.max(maxRight, Math.abs(rightOutput[i]));
+                                }
+                                
+                                if (maxLeft > 0 || maxRight > 0) {
+                                    console.log('[STREAM-ELECTRON] Output has sound! L:', maxLeft.toFixed(4), 'R:', maxRight.toFixed(4));
+                                } else if (leftStatus.available > 0) {
+                                    console.log('[STREAM-ELECTRON] WARNING: Buffer has data but output is silent!');
+                                    // ДИАГНОСТИКА: Проверяем что в буфере
+                                    let bufferMax = 0;
+                                    for (let i = 0; i < Math.min(100, leftStatus.available); i++) {
+                                        const idx = (leftRingBuffer.readIndex + i) % leftRingBuffer.size;
+                                        bufferMax = Math.max(bufferMax, Math.abs(leftRingBuffer.buffer[idx]));
+                                    }
+                                    console.log('[STREAM-ELECTRON] Buffer content max value:', bufferMax.toFixed(6));
+                                }
+                            }
                         };
                         
                         const destination = audioContext.createMediaStreamDestination();
                         scriptProcessor.connect(destination);
                         
+                        console.log('[STREAM-ELECTRON] Destination stream tracks:', destination.stream.getTracks().length);
+                        
+                        const destAudioTrack = destination.stream.getAudioTracks()[0];
+                        if (destAudioTrack) {
+                            console.log('[STREAM-ELECTRON] Destination audio track:', {
+                                enabled: destAudioTrack.enabled,
+                                muted: destAudioTrack.muted,
+                                readyState: destAudioTrack.readyState,
+                                id: destAudioTrack.id
+                            });
+                        }
+
                         // Создаем гибридный поток
                         const hybridStream = new MediaStream();
                         hybridStream.addTrack(videoTrack);
@@ -1077,27 +1133,48 @@ export class JitsiManager {
         this.state.audioFrameCount++;
 
         if (this.state.audioFrameCount === 1) {
-            log.info("[STREAM-ELECTRON] First audio frame - source:", audioData.source);
-            log.info("[STREAM-ELECTRON] >>> processNativeAudio FIRST FRAME");
+            log.info("[STREAM-ELECTRON] First audio frame received");
+            log.info("[STREAM-ELECTRON] Audio format:", {
+                sampleRate: audioData.sampleRate,
+                channels: audioData.channels,
+                numSamples: audioData.numSamples,
+                source: audioData.source,
+                dataSize: audioData.data?.byteLength || audioData.dataByteLength
+            });
         }
         
         try {
             const arrayBuffer = audioData.data;
+            if (!arrayBuffer || !(arrayBuffer instanceof ArrayBuffer)) {
+                log.error(`[STREAM-ELECTRON] Invalid audio data type: ${typeof arrayBuffer}`);
+                return;
+            }
+            
             const samples = audioData.numSamples || 960;
             const channels = audioData.channels || 2;
             
-            // Декодируем аудио
+            // ИСПОЛЬЗУЕМ вспомогательный метод для декодирования
             const { leftChannel, rightChannel } = this.decodeAudioData(arrayBuffer, samples, channels);
             
-            // Анализируем уровни
+            // ИСПОЛЬЗУЕМ метод для анализа уровней
             const levels = this.analyzeAudioLevels(leftChannel, rightChannel);
             
             if (this.state.audioFrameCount % 50 === 0) {
-                log.info(`[STREAM-ELECTRON] Audio: Frame ${this.state.audioFrameCount}, ` +
-                        `L=${levels.maxLeft.toFixed(4)}, R=${levels.maxRight.toFixed(4)}`);
+                log.info(`[STREAM-ELECTRON] Audio levels: L=${levels.maxLeft.toFixed(4)}, R=${levels.maxRight.toFixed(4)}`);
+                
+                if (!levels.hasAudio) {
+                    // Проверяем сырые данные
+                    const float32Data = new Float32Array(arrayBuffer);
+                    let rawMax = 0;
+                    for (let i = 0; i < Math.min(100, float32Data.length); i++) {
+                        rawMax = Math.max(rawMax, Math.abs(float32Data[i]));
+                    }
+                    log.info(`[STREAM-ELECTRON] No audio detected! Raw max: ${rawMax}, First 10 samples:`, 
+                            Array.from(float32Data.slice(0, 10)));
+                }
             }
             
-            // Нормализуем
+            // ИСПОЛЬЗУЕМ метод для нормализации
             const { processedLeft, processedRight } = this.normalizeAudio(
                 leftChannel, 
                 rightChannel, 
@@ -1118,34 +1195,49 @@ export class JitsiManager {
         channels: number
     ): { leftChannel: Float32Array; rightChannel: Float32Array } {
         
-        let leftChannel = new Float32Array(samples);
-        let rightChannel = new Float32Array(samples);
+        if (this.state.audioFrameCount <= 3) {
+            log.info("[STREAM-ELECTRON] decodeAudioData called");
+        }
         
-        if (arrayBuffer.byteLength === samples * channels * 4) {
-            const dataView = new DataView(arrayBuffer);
+        const float32Data = new Float32Array(arrayBuffer);
+        
+        // Улучшенная диагностика
+        if (this.state.audioFrameCount <= 3) {
+            const diagnostics = {
+                arrayBufferSize: arrayBuffer.byteLength,
+                float32Length: float32Data.length,
+                expectedLength: samples * channels,
+                first10values: Array.from(float32Data.slice(0, 10)).map(v => v.toFixed(6)),
+                hasNonZero: false,
+                maxValue: 0
+            };
             
-            // Планарный формат
-            const halfSize = arrayBuffer.byteLength / 2;
-            for (let i = 0; i < samples; i++) {
-                leftChannel[i] = dataView.getFloat32(i * 4, true);
-                rightChannel[i] = dataView.getFloat32(halfSize + i * 4, true);
+            // Проверяем есть ли ненулевые значения
+            for (let i = 0; i < Math.min(100, float32Data.length); i++) {
+                const absVal = Math.abs(float32Data[i]);
+                if (absVal > 0.00001) {
+                    diagnostics.hasNonZero = true;
+                }
+                diagnostics.maxValue = Math.max(diagnostics.maxValue, absVal);
             }
             
-            // Проверка на валидность
-            let hasData = false;
-            for (let i = 0; i < samples; i++) {
-                if (Math.abs(leftChannel[i]) > 0.00001 || Math.abs(rightChannel[i]) > 0.00001) {
-                    hasData = true;
-                    break;
-                }
-            }
+            log.info(`[STREAM-ELECTRON] Decoding frame ${this.state.audioFrameCount}:`, 
+                    JSON.stringify(diagnostics, null, 2));
+        }
+        
+        const leftChannel = new Float32Array(samples);
+        const rightChannel = new Float32Array(samples);
+        
+        // Деинтерливинг
+        for (let i = 0; i < samples; i++) {
+            const leftIdx = i * 2;
+            const rightIdx = i * 2 + 1;
             
-            // Если нет данных, пробуем интерливд
-            if (!hasData) {
-                for (let i = 0; i < samples; i++) {
-                    leftChannel[i] = dataView.getFloat32(i * 8, true);
-                    rightChannel[i] = dataView.getFloat32(i * 8 + 4, true);
-                }
+            if (leftIdx < float32Data.length) {
+                leftChannel[i] = float32Data[leftIdx];
+            }
+            if (rightIdx < float32Data.length) {
+                rightChannel[i] = float32Data[rightIdx];
             }
         }
         
@@ -1155,42 +1247,90 @@ export class JitsiManager {
     private analyzeAudioLevels(
         leftChannel: Float32Array, 
         rightChannel: Float32Array
-    ): { maxLeft: number; maxRight: number; hasAudio: boolean } {
+    ): { maxLeft: number; maxRight: number; hasAudio: boolean; avgLeft: number; avgRight: number } {
+        
+        // Логируем вызов метода
+        if (this.state.audioFrameCount <= 3) {
+            log.info("[STREAM-ELECTRON] analyzeAudioLevels called");
+        }
         
         let maxLeft = 0, maxRight = 0;
+        let avgLeft = 0, avgRight = 0;
+        const samples = leftChannel.length;
         
-        for (let i = 0; i < leftChannel.length; i++) {
-            maxLeft = Math.max(maxLeft, Math.abs(leftChannel[i]));
-            maxRight = Math.max(maxRight, Math.abs(rightChannel[i]));
+        for (let i = 0; i < samples; i++) {
+            const absLeft = Math.abs(leftChannel[i]);
+            const absRight = Math.abs(rightChannel[i]);
+            
+            maxLeft = Math.max(maxLeft, absLeft);
+            maxRight = Math.max(maxRight, absRight);
+            avgLeft += absLeft;
+            avgRight += absRight;
         }
+        
+        avgLeft /= samples;
+        avgRight /= samples;
         
         const hasAudio = maxLeft > 0.00001 || maxRight > 0.00001;
         
-        return { maxLeft, maxRight, hasAudio };
+        return { maxLeft, maxRight, hasAudio, avgLeft, avgRight };
     }
 
     private normalizeAudio(
         leftChannel: Float32Array,
         rightChannel: Float32Array,
-        levels: { maxLeft: number; maxRight: number; hasAudio: boolean }
+        levels: { maxLeft: number; maxRight: number; hasAudio: boolean; avgLeft?: number; avgRight?: number }
     ): { processedLeft: Float32Array; processedRight: Float32Array } {
         
+        // Логируем вызов метода
+        if (this.state.audioFrameCount <= 3 || this.state.audioFrameCount % 100 === 0) {
+            log.info("[STREAM-ELECTRON] normalizeAudio called");
+        }
+        
         const samples = leftChannel.length;
-        const processedLeft = new Float32Array(samples);
-        const processedRight = new Float32Array(samples);
+        let processedLeft = leftChannel;
+        let processedRight = rightChannel;
         
         if (levels.hasAudio) {
-            const targetPeak = 0.7;
             const currentPeak = Math.max(levels.maxLeft, levels.maxRight);
-            const gain = currentPeak > 0.001 ? Math.min(targetPeak / currentPeak, 3.0) : 1.0;
             
-            for (let i = 0; i < samples; i++) {
-                processedLeft[i] = Math.max(-1, Math.min(1, leftChannel[i] * gain));
-                processedRight[i] = Math.max(-1, Math.min(1, rightChannel[i] * gain));
+            // Усиливаем тихий звук
+            if (currentPeak < 0.1) {
+                const targetPeak = 0.5;
+                const gain = targetPeak / currentPeak;
+                const safeGain = Math.min(gain, 10.0);
+                
+                processedLeft = new Float32Array(samples);
+                processedRight = new Float32Array(samples);
+                
+                for (let i = 0; i < samples; i++) {
+                    processedLeft[i] = Math.max(-1, Math.min(1, leftChannel[i] * safeGain));
+                    processedRight[i] = Math.max(-1, Math.min(1, rightChannel[i] * safeGain));
+                }
+                
+                if (this.state.audioFrameCount % 50 === 0) {
+                    log.info(`[STREAM-ELECTRON] Applied gain: ${safeGain.toFixed(2)}`);
+                }
             }
-        } else {
-            processedLeft.set(leftChannel);
-            processedRight.set(rightChannel);
+            // Ослабляем громкий звук
+            else if (currentPeak > 0.9) {
+                const targetPeak = 0.7;
+                const gain = targetPeak / currentPeak;
+                
+                processedLeft = new Float32Array(samples);
+                processedRight = new Float32Array(samples);
+                
+                for (let i = 0; i < samples; i++) {
+                    processedLeft[i] = leftChannel[i] * gain;
+                    processedRight[i] = rightChannel[i] * gain;
+                }
+                
+                if (this.state.audioFrameCount % 50 === 0) {
+                    log.info(`[STREAM-ELECTRON] Reduced gain: ${gain.toFixed(2)}`);
+                }
+            }
+        } else if (this.state.audioFrameCount % 100 === 0) {
+            log.warn(`[STREAM-ELECTRON] Silent frame ${this.state.audioFrameCount}`);
         }
         
         return { processedLeft, processedRight };
@@ -1204,36 +1344,63 @@ export class JitsiManager {
         
         if (!this.state.window || this.state.window.isDestroyed()) return;
         
+        // Логируем частоту вызовов
+        if (this.state.audioFrameCount % 50 === 0) {
+            log.info(`[STREAM-ELECTRON] Sending frame ${this.state.audioFrameCount} to Jitsi, samples: ${samples}`);
+        }
+        
         const jsCode = `
             (function() {
                 if (!window.isNativeActive || !window.leftRingBuffer || !window.rightRingBuffer) {
+                    console.warn('[STREAM-ELECTRON] Audio system not ready');
                     return;
                 }
                 
                 try {
-                    const leftData = [${Array.from(leftData).join(',')}];
-                    const rightData = [${Array.from(rightData).join(',')}];
+                    const leftData = new Float32Array([${Array.from(leftData).join(',')}]);
+                    const rightData = new Float32Array([${Array.from(rightData).join(',')}]);
                     
-                    window.leftRingBuffer.write(new Float32Array(leftData));
-                    window.rightRingBuffer.write(new Float32Array(rightData));
+                    // Проверяем что данные не пустые перед записью
+                    let hasSound = false;
+                    for (let i = 0; i < Math.min(100, leftData.length); i++) {
+                        if (Math.abs(leftData[i]) > 0.0001 || Math.abs(rightData[i]) > 0.0001) {
+                            hasSound = true;
+                            break;
+                        }
+                    }
+                    
+                    window.leftRingBuffer.write(leftData);
+                    window.rightRingBuffer.write(rightData);
                     
                     window.audioCounter = (window.audioCounter || 0) + 1;
                     
                     if (window.audioCounter === 1) {
-                        console.log('[STREAM-ELECTRON] First audio in buffer!');
+                        console.log('[STREAM-ELECTRON] First audio in buffer, has sound:', hasSound);
                     }
                     
                     if (window.audioCounter % 100 === 0) {
-                        const bufferMs = window.leftRingBuffer.availableSamples / 48;
-                        console.log('[STREAM-ELECTRON] Audio: ' + window.audioCounter + ' frames, ' + bufferMs.toFixed(0) + 'ms');
+                        const status = window.leftRingBuffer.getStatus();
+                        console.log('[STREAM-ELECTRON] Buffer status:', 
+                            JSON.stringify({
+                                frames: window.audioCounter,
+                                available: status.available,
+                                written: status.totalWritten,
+                                read: status.totalRead,
+                                hasSound: hasSound
+                            })
+                        );
                     }
                 } catch (e) {
-                    console.error('[STREAM-ELECTRON] Audio error:', e);
+                    console.error('[STREAM-ELECTRON] Audio injection error:', e);
                 }
             })();
         `;
         
-        this.state.window.webContents.executeJavaScript(jsCode).catch(() => {});
+        this.state.window.webContents.executeJavaScript(jsCode).catch((err) => {
+            if (this.state.audioFrameCount <= 5) {
+                log.error(`[STREAM-ELECTRON] Failed to inject audio: ${err.message}`);
+            }
+        });
     }
 
     private getScreenShareInterceptorCode(): string {
@@ -1798,28 +1965,24 @@ export class JitsiManager {
                     }
                     
                     window.__conferenceEventHandlersInstalled = true;
-                    console.log('[JITSI-EVENTS] Installing conference event handlers...');
+                    console.log('[JITSI-EVENTS] Installing SDK event handlers...');
                     
-                    // Флаг для предотвращения множественных вызовов
                     let isLeavingConference = false;
                     let hasJoinedConference = false;
                     
                     // Функция для безопасного вызова conference-left
                     const triggerConferenceLeft = (reason) => {
-                        // Игнорируем события если еще не присоединились к конференции
                         if (!hasJoinedConference && reason !== 'videoConferenceLeft') {
                             console.log('[JITSI-EVENTS] Ignoring leave event - not joined yet');
                             return;
                         }
                         
-                        // Для videoConferenceLeft не проверяем дубликаты, так как это финальное событие
                         if (reason !== 'videoConferenceLeft' && isLeavingConference) {
                             console.log('[JITSI-EVENTS] Already leaving, ignoring duplicate event');
                             return;
                         }
                         
                         if (reason === 'videoConferenceLeft') {
-                            // Это финальное событие - всегда обрабатываем
                             isLeavingConference = true;
                         }
                         
@@ -1828,13 +1991,6 @@ export class JitsiManager {
                             window.ipcRenderer.invoke('jitsi:conference-left', { 
                                 reason: reason,
                                 timestamp: Date.now()
-                            }).then(() => {
-                                // Сброс флага через некоторое время на случай ошибки
-                                if (reason !== 'videoConferenceLeft') {
-                                    setTimeout(() => {
-                                        isLeavingConference = false;
-                                    }, 5000);
-                                }
                             });
                         }
                     };
@@ -1849,61 +2005,28 @@ export class JitsiManager {
                         }
                     };
                     
-                    // === ОТСЛЕЖИВАНИЕ JITSI IFRAME API EVENTS ===
-                    // Это самый надежный способ для встроенного Jitsi
-                    const setupIframeAPIListeners = () => {
-                        // Проверяем наличие Jitsi iframe API
-                        if (window.JitsiMeetExternalAPI || window.api) {
-                            console.log('[JITSI-EVENTS] Setting up iframe API listeners');
-                            
-                            // Слушаем глобальные события через postMessage
-                            window.addEventListener('message', (event) => {
-                                if (event.data && event.data.type) {
-                                    // Jitsi отправляет события через postMessage
-                                    switch(event.data.type) {
-                                        case 'video-conference-joined':
-                                        case 'videoConferenceJoined':
-                                            console.log('[JITSI-EVENTS] videoConferenceJoined via postMessage');
-                                            triggerConferenceJoined();
-                                            break;
-                                            
-                                        case 'video-conference-left':
-                                        case 'videoConferenceLeft':
-                                            console.log('[JITSI-EVENTS] videoConferenceLeft via postMessage');
-                                            triggerConferenceLeft('videoConferenceLeft');
-                                            break;
-                                    }
-                                }
-                            });
-                        }
-                    };
-                    
-                    // === ОТСЛЕЖИВАНИЕ NATIVE JITSI EVENTS ===
+                    // === ОТСЛЕЖИВАНИЕ ТОЛЬКО NATIVE JITSI EVENTS (SDK) ===
                     if (window.APP && window.APP.conference) {
-                        // Ждем, пока room станет доступен
                         const waitForRoom = () => {
                             if (window.APP.conference.room) {
                                 const room = window.APP.conference.room;
                                 
-                                // Событие присоединения к комнате
+                                // События SDK
                                 room.on('conference.joined', function() {
-                                    console.log('[JITSI-EVENTS] Conference joined (native)');
+                                    console.log('[JITSI-EVENTS] Conference joined (SDK)');
                                     triggerConferenceJoined();
                                 });
                                 
-                                // Событие выхода из комнаты
                                 room.on('conference.left', function() {
-                                    console.log('[JITSI-EVENTS] Conference left (native)');
+                                    console.log('[JITSI-EVENTS] Conference left (SDK)');
                                     triggerConferenceLeft('conference_left_event');
                                 });
                                 
-                                // Событие отключения
                                 room.on('conference.disconnected', function() {
                                     console.log('[JITSI-EVENTS] Conference disconnected');
                                     triggerConferenceLeft('conference_disconnected');
                                 });
                                 
-                                // Событие ошибки подключения
                                 room.on('conference.error', function(error) {
                                     console.log('[JITSI-EVENTS] Conference error:', error);
                                     if (error === 'conference.connectionError' || 
@@ -1918,7 +2041,6 @@ export class JitsiManager {
                                     triggerConferenceJoined();
                                 }
                             } else {
-                                // Если room еще не готов, проверяем снова через 100ms
                                 setTimeout(waitForRoom, 100);
                             }
                         };
@@ -1926,114 +2048,42 @@ export class JitsiManager {
                         waitForRoom();
                     }
                     
-                    // === ОТСЛЕЖИВАНИЕ JITSI EXTERNAL API ===
-                    // Ищем внешний API Jitsi (для iframe интеграции)
-                    const checkForExternalAPI = () => {
-                        // Проверяем различные способы доступа к API
-                        const possibleAPIs = [
-                            window.JitsiMeetExternalAPI,
-                            window.JitsiMeetJS,
-                            window.api,
-                            window.jitsiAPI,
-                            window.meetAPI
-                        ];
-                        
-                        for (let api of possibleAPIs) {
-                            if (api && api.on) {
-                                console.log('[JITSI-EVENTS] Found Jitsi External API');
-                                
-                                // Подписываемся на события
-                                api.on('videoConferenceJoined', (event) => {
-                                    console.log('[JITSI-EVENTS] videoConferenceJoined (external API)', event);
+                    // Мониторинг Redux store для SDK событий
+                    if (window.APP && window.APP.store) {
+                        const originalDispatch = window.APP.store.dispatch;
+                        window.APP.store.dispatch = function(action) {
+                            if (action && action.type) {
+                                if (action.type === 'CONFERENCE_LEFT' || 
+                                    action.type === 'CONFERENCE_WILL_LEAVE') {
+                                    console.log('[JITSI-EVENTS] Redux action:', action.type);
+                                    triggerConferenceLeft('videoConferenceLeft');
+                                } else if (action.type === 'CONFERENCE_JOINED') {
+                                    console.log('[JITSI-EVENTS] Redux action: CONFERENCE_JOINED');
                                     triggerConferenceJoined();
-                                });
-                                
-                                api.on('videoConferenceLeft', (event) => {
-                                    console.log('[JITSI-EVENTS] videoConferenceLeft (external API)', event);
-                                    triggerConferenceLeft('videoConferenceLeft');
-                                });
-                                
-                                api.on('readyToClose', (event) => {
-                                    console.log('[JITSI-EVENTS] readyToClose (external API)', event);
-                                    triggerConferenceLeft('videoConferenceLeft');
-                                });
-                                
-                                break;
+                                }
                             }
-                        }
-                    };
+                            return originalDispatch.apply(this, arguments);
+                        };
+                    }
                     
-                    // === МОНИТОРИНГ DOM ДЛЯ СОБЫТИЙ UI ===
-                    // Слушаем кнопки в дополнительном меню после нажатия "Завершить"
-                    const observeEndMeetingMenu = () => {
-                        const observer = new MutationObserver((mutations) => {
-                            // Селекторы для кнопок в меню завершения
-                            const endMeetingSelectors = [
-                                // Английские варианты
-                                '[aria-label*="Leave meeting" i]',
-                                '[aria-label*="End meeting for all" i]',
-                                '[data-testid="end-meeting-leave"]',
-                                '[data-testid="end-meeting-for-all"]',
-                                'button:contains("Leave")',
-                                'button:contains("End for all")',
-                                
-                                // Русские варианты
-                                '[aria-label*="Покинуть" i]:not([aria-label*="меню" i])',
-                                '[aria-label*="Завершить для всех" i]',
-                                'button:contains("Покинуть")',
-                                'button:contains("Завершить для всех")',
-                                
-                                // Общие селекторы для popup меню
-                                '.modal-dialog-footer button',
-                                '.dialog-footer button',
-                                '.end-meeting-dialog button',
-                                '[role="dialog"] button'
-                            ];
+                    // Слушаем кнопку завершения в UI
+                    const observeHangupButton = () => {
+                        const observer = new MutationObserver(() => {
+                            const hangupButton = document.querySelector('[aria-label*="Hangup"]') ||
+                                                document.querySelector('[aria-label*="Завершить"]') ||
+                                                document.querySelector('.hangup-button');
                             
-                            endMeetingSelectors.forEach(selector => {
-                                let buttons;
-                                
-                                // Для :contains используем jQuery если доступен
-                                if (selector.includes(':contains')) {
-                                    if (window.$ || window.jQuery) {
-                                        buttons = (window.$ || window.jQuery)(selector);
-                                    } else {
-                                        // Fallback без jQuery
-                                        const searchText = selector.match(/:contains\\("(.+?)"\\)/)?.[1];
-                                        if (searchText) {
-                                            buttons = Array.from(document.querySelectorAll('button')).filter(
-                                                btn => btn.textContent.includes(searchText)
-                                            );
+                            if (hangupButton && !hangupButton.__hangupListenerAdded) {
+                                hangupButton.__hangupListenerAdded = true;
+                                hangupButton.addEventListener('click', () => {
+                                    console.log('[JITSI-EVENTS] Hangup button clicked');
+                                    setTimeout(() => {
+                                        if (!isLeavingConference) {
+                                            triggerConferenceLeft('videoConferenceLeft');
                                         }
-                                    }
-                                } else {
-                                    buttons = document.querySelectorAll(selector);
-                                }
-                                
-                                if (buttons && buttons.length > 0) {
-                                    (buttons.forEach ? buttons : Array.from(buttons)).forEach(button => {
-                                        if (!button.__endMeetingListenerAdded) {
-                                            button.__endMeetingListenerAdded = true;
-                                            
-                                            button.addEventListener('click', () => {
-                                                const buttonText = button.textContent || button.getAttribute('aria-label') || '';
-                                                console.log('[JITSI-EVENTS] End meeting menu button clicked:', buttonText);
-                                                
-                                                // Ждем немного, чтобы Jitsi обработал клик и отправил videoConferenceLeft
-                                                // Но если событие не придет, принудительно закрываем через 2 секунды
-                                                setTimeout(() => {
-                                                    if (!isLeavingConference) {
-                                                        console.log('[JITSI-EVENTS] No videoConferenceLeft received, forcing close');
-                                                        triggerConferenceLeft('videoConferenceLeft');
-                                                    }
-                                                }, 2000);
-                                            });
-                                            
-                                            console.log('[JITSI-EVENTS] Added listener to end meeting button:', button.textContent);
-                                        }
-                                    });
-                                }
-                            });
+                                    }, 500);
+                                });
+                            }
                         });
                         
                         observer.observe(document.body, {
@@ -2042,48 +2092,9 @@ export class JitsiManager {
                         });
                     };
                     
-                    // === ПЕРЕХВАТ JITSI API МЕТОДОВ ===
-                    const interceptJitsiMethods = () => {
-                        // Ждем появления APP.conference
-                        const interceptInterval = setInterval(() => {
-                            if (window.APP && window.APP.conference) {
-                                clearInterval(interceptInterval);
-                                
-                                // Слушаем событие videoConferenceLeft напрямую
-                                if (window.APP.store) {
-                                    const originalDispatch = window.APP.store.dispatch;
-                                    window.APP.store.dispatch = function(action) {
-                                        if (action && action.type) {
-                                            if (action.type === 'CONFERENCE_LEFT' || 
-                                                action.type === 'CONFERENCE_WILL_LEAVE') {
-                                                console.log('[JITSI-EVENTS] Redux action:', action.type);
-                                                triggerConferenceLeft('videoConferenceLeft');
-                                            } else if (action.type === 'CONFERENCE_JOINED') {
-                                                console.log('[JITSI-EVENTS] Redux action: CONFERENCE_JOINED');
-                                                triggerConferenceJoined();
-                                            }
-                                        }
-                                        return originalDispatch.apply(this, arguments);
-                                    };
-                                }
-                            }
-                        }, 100);
-                        
-                        // Останавливаем через 10 секунд если не нашли
-                        setTimeout(() => clearInterval(interceptInterval), 10000);
-                    };
+                    observeHangupButton();
                     
-                    // === ЗАПУСК ВСЕХ LISTENERS ===
-                    setupIframeAPIListeners();
-                    checkForExternalAPI();
-                    observeEndMeetingMenu();
-                    interceptJitsiMethods();
-                    
-                    // Проверяем External API с задержкой (может загрузиться позже)
-                    setTimeout(checkForExternalAPI, 1000);
-                    setTimeout(checkForExternalAPI, 3000);
-                    
-                    // Дополнительно слушаем событие beforeunload
+                    // Событие закрытия страницы
                     window.addEventListener('beforeunload', (e) => {
                         console.log('[JITSI-EVENTS] Page unloading');
                         if (hasJoinedConference && !isLeavingConference) {
@@ -2091,7 +2102,7 @@ export class JitsiManager {
                         }
                     });
                     
-                    console.log('[JITSI-EVENTS] ✅ Conference event handlers installed');
+                    console.log('[JITSI-EVENTS] ✅ SDK event handlers installed');
                 })();
             `);
         } catch (error: any) {
@@ -2099,19 +2110,21 @@ export class JitsiManager {
         }
     }
 
+    
     private async injectReadinessDetector(): Promise<void> {
         if (!this.state.window || this.state.window.isDestroyed()) return;
         
         try {
             await this.state.window.webContents.executeJavaScript(`
                 (function() {
-                    console.log('[JITSI-EVENTS] Installing readiness detector...');
+                    console.log('[JITSI-EVENTS] Installing SDK readiness detector...');
                     
-                    // Ждем полной загрузки Jitsi API
+                    // Ждем полной загрузки Jitsi SDK
                     const checkJitsiReady = setInterval(() => {
+                        // Проверяем только SDK компоненты
                         if (window.JitsiMeetJS && window.APP && window.APP.conference) {
                             clearInterval(checkJitsiReady);
-                            console.log('[JITSI-EVENTS] Jitsi is ready!');
+                            console.log('[JITSI-EVENTS] Jitsi SDK is ready!');
                             
                             // Уведомляем main process
                             if (window.ipcRenderer) {
@@ -2119,6 +2132,12 @@ export class JitsiManager {
                             }
                         }
                     }, 100);
+                    
+                    // Таймаут на случай если что-то пошло не так
+                    setTimeout(() => {
+                        clearInterval(checkJitsiReady);
+                        console.log('[JITSI-EVENTS] SDK readiness check timeout');
+                    }, 30000);
                 })();
             `);
         } catch (error: any) {

@@ -160,83 +160,42 @@ export class NativeAddonWrapper {
                 },
                 
                 // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обработка audio callback
+                // В методе createUnifiedAddon для macOS, секция setWebRTCAudioCallback
                 setWebRTCAudioCallback: (callback: (data: any) => void) => {
                     if (rawAddon.setWebRTCAudioCallback) {
                         rawAddon.setWebRTCAudioCallback((audioData: any) => {
                             this.audioFrameCount++;
                             
-                            // Детальная диагностика для первых кадров
+                            // Согласно README, плагин возвращает объект с полем data (ArrayBuffer)
+                            // и метаданными. Убеждаемся, что передаем данные правильно
+                            
                             if (this.audioFrameCount <= 3) {
-                                log.info(`[Audio Frame ${this.audioFrameCount}] Raw data structure:`, {
+                                log.info(`[Audio Frame ${this.audioFrameCount}] Structure:`, {
                                     hasData: !!audioData?.data,
-                                    dataType: typeof audioData?.data,
-                                    dataConstructor: audioData?.data?.constructor?.name,
-                                    dataByteLength: audioData?.data?.byteLength || audioData?.dataByteLength,
-                                    hasDataField: 'data' in (audioData || {}),
+                                    dataType: audioData?.data?.constructor?.name,
+                                    byteLength: audioData?.data?.byteLength || audioData?.dataByteLength,
                                     sampleRate: audioData?.sampleRate,
                                     channels: audioData?.channels,
-                                    source: audioData?.source,
-                                    allKeys: Object.keys(audioData || {})
+                                    numSamples: audioData?.numSamples,
+                                    source: audioData?.source
                                 });
                             }
                             
-                            // ВАЖНО: Проверяем и нормализуем данные
-                            let normalizedData: any = {
-                                sampleRate: audioData?.sampleRate || 48000,
-                                channels: audioData?.channels || 2,
-                                numSamples: audioData?.numSamples || 960,
-                                source: audioData?.source || 'unknown',
-                                timestamp: audioData?.timestamp || Date.now(),
-                                frameNumber: this.audioFrameCount
-                            };
-                            
-                            // Проверяем наличие аудио данных в разных форматах
-                            if (audioData?.data) {
-                                // Данные в поле data
-                                normalizedData.data = audioData.data;
-                                normalizedData.hasData = true;
-                                normalizedData.dataByteLength = audioData.data.byteLength || 0;
+                            // ВАЖНО: Передаем данные как есть, без излишней нормализации
+                            // Плагин уже возвращает правильную структуру согласно README
+                            if (audioData && audioData.data instanceof ArrayBuffer) {
+                                callback(audioData);
                                 
                                 if (this.audioFrameCount === 1) {
-                                    log.info('✅ Audio data found in "data" field');
-                                }
-                            } else if (audioData?.audioData) {
-                                // Данные могут быть в поле audioData
-                                normalizedData.data = audioData.audioData;
-                                normalizedData.hasData = true;
-                                normalizedData.dataByteLength = audioData.audioData.byteLength || 0;
-                                
-                                if (this.audioFrameCount === 1) {
-                                    log.info('✅ Audio data found in "audioData" field');
-                                }
-                            } else if (audioData instanceof ArrayBuffer) {
-                                // Сами данные являются ArrayBuffer
-                                normalizedData.data = audioData;
-                                normalizedData.hasData = true;
-                                normalizedData.dataByteLength = audioData.byteLength;
-                                
-                                if (this.audioFrameCount === 1) {
-                                    log.info('✅ Audio data IS the ArrayBuffer');
+                                    log.info('✅ Audio data passed through correctly');
                                 }
                             } else {
-                                // Нет данных
-                                normalizedData.data = new ArrayBuffer(0);
-                                normalizedData.hasData = false;
-                                normalizedData.dataByteLength = 0;
-                                
-                                if (this.audioFrameCount <= 3) {
-                                    log.warn(`⚠️ No audio data in frame ${this.audioFrameCount}`);
-                                    log.warn('Available fields:', Object.keys(audioData || {}));
-                                }
+                                log.error(`⚠️ Invalid audio data format in frame ${this.audioFrameCount}`);
                             }
                             
-                            // Логируем каждый 100-й кадр для мониторинга
                             if (this.audioFrameCount % 100 === 0) {
-                                log.info(`Audio frames: ${this.audioFrameCount}, Last frame size: ${normalizedData.dataByteLength} bytes`);
+                                log.info(`Audio frames: ${this.audioFrameCount}, Last size: ${audioData?.data?.byteLength} bytes`);
                             }
-                            
-                            // Передаем нормализованные данные
-                            callback(normalizedData);
                         });
                     }
                 }
@@ -308,11 +267,54 @@ export class NativeAddonWrapper {
                 },
 
                 setWebRTCAudioCallback: (callback: (data: any) => void) => {
-                    // Windows модуль может использовать другое имя
-                    if (rawAddon.setAudioCallback) {
-                        rawAddon.setAudioCallback(callback);
-                    } else if (rawAddon.setWebRTCAudioCallback) {
-                        rawAddon.setWebRTCAudioCallback(callback);
+                    if (rawAddon.setWebRTCAudioCallback) {
+                        rawAddon.setWebRTCAudioCallback((audioData: any) => {
+                            this.audioFrameCount++;
+                            
+                            // Детальная проверка данных от Swift
+                            if (audioData?.data instanceof ArrayBuffer) {
+                                const float32 = new Float32Array(audioData.data);
+                                let maxVal = 0;
+                                let hasSound = false;
+                                
+                                for (let i = 0; i < float32.length; i++) {
+                                    const absVal = Math.abs(float32[i]);
+                                    maxVal = Math.max(maxVal, absVal);
+                                    if (absVal > 0.0001) {
+                                        hasSound = true;
+                                    }
+                                }
+                                
+                                if (hasSound) {
+                                    nonZeroFrameCount++;
+                                } else {
+                                    zeroFrameCount++;
+                                }
+                                
+                                // Логируем статистику каждые 100 кадров
+                                if (this.audioFrameCount % 100 === 0) {
+                                    const percentWithSound = (nonZeroFrameCount / (zeroFrameCount + nonZeroFrameCount) * 100).toFixed(1);
+                                    log.info(`[Swift Audio Stats]: Frames with sound: ${nonZeroFrameCount}, silent: ${zeroFrameCount} (${percentWithSound}% have sound)`);
+                                    
+                                    if (percentWithSound < 10) {
+                                        log.error('⚠️ WARNING: Less than 10% of frames from Swift contain audio!');
+                                    }
+                                }
+                                
+                                // Логируем детали для первых кадров и кадров с звуком
+                                if (this.audioFrameCount <= 5 || (hasSound && this.audioFrameCount % 50 === 0)) {
+                                    log.info(`[Swift Frame ${this.audioFrameCount}]:`, {
+                                        hasSound: hasSound,
+                                        maxValue: maxVal.toFixed(8),
+                                        source: audioData.source,
+                                        byteLength: audioData.data.byteLength
+                                    });
+                                }
+                            }
+                            
+                            // Передаем данные дальше
+                            callback(audioData);
+                        });
                     }
                 },
 
