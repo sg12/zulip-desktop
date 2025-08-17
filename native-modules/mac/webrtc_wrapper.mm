@@ -10,6 +10,8 @@
 #include <string.h>  // Для memcpy
 #include <stdlib.h>  // Для malloc/free
 #include <math.h>  // Для fmod
+#include <queue>
+#include <mutex>
 
 // Include Foundation and other frameworks first
 #import <Foundation/Foundation.h>
@@ -70,6 +72,109 @@ struct WorkData {
 };
 
 static std::map<std::string, StreamInfo> g_active_streams;
+
+struct AudioCallbackData {
+    Persistent<Function>* callback;
+    void* audioData;
+    size_t audioDataSize;
+    double timestamp;
+    long numSamples;
+    double sampleRate;
+    uint32_t channels;
+    bool isSystemAudio;
+    uint64_t frameNumber;
+};
+
+// UV async handle для вызова callback в главном потоке
+static uv_async_t g_audio_async;
+static std::queue<AudioCallbackData*> g_audio_queue;
+static std::mutex g_audio_mutex;
+
+// Функция, которая будет вызвана в главном потоке
+static void ProcessAudioCallback(uv_async_t* handle) {
+    Isolate* isolate = Isolate::GetCurrent();
+    if (!isolate) return;
+    
+    HandleScope scope(isolate);
+    Local<Context> context = isolate->GetCurrentContext();
+    
+    std::vector<AudioCallbackData*> dataToProcess;
+    
+    // Забираем все данные из очереди
+    {
+        std::lock_guard<std::mutex> lock(g_audio_mutex);
+        while (!g_audio_queue.empty()) {
+            dataToProcess.push_back(g_audio_queue.front());
+            g_audio_queue.pop();
+        }
+    }
+    
+    // Обрабатываем каждый callback
+    for (auto* data : dataToProcess) {
+        if (!data->callback->IsEmpty()) {
+            Local<Function> jsCallback = Local<Function>::New(isolate, *(data->callback));
+            
+            // Создаем объект с аудио данными
+            Local<Object> audioInfo = Object::New(isolate);
+            
+            // Добавляем ArrayBuffer с данными
+            if (data->audioData && data->audioDataSize > 0) {
+                Local<ArrayBuffer> arrayBuffer = ArrayBuffer::New(isolate, data->audioDataSize);
+                void* bufferData = arrayBuffer->GetBackingStore()->Data();
+                memcpy(bufferData, data->audioData, data->audioDataSize);
+                
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "data").ToLocalChecked(),
+                    arrayBuffer).ToChecked();
+                    
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "hasData").ToLocalChecked(),
+                    v8::Boolean::New(isolate, true)).ToChecked();
+                    
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "dataByteLength").ToLocalChecked(),
+                    Number::New(isolate, static_cast<double>(data->audioDataSize))).ToChecked();
+            }
+            
+            // Добавляем метаданные
+            audioInfo->Set(context,
+                String::NewFromUtf8(isolate, "timestamp").ToLocalChecked(),
+                Number::New(isolate, data->timestamp)).ToChecked();
+                
+            audioInfo->Set(context,
+                String::NewFromUtf8(isolate, "sampleRate").ToLocalChecked(),
+                Number::New(isolate, data->sampleRate)).ToChecked();
+                
+            audioInfo->Set(context,
+                String::NewFromUtf8(isolate, "channels").ToLocalChecked(),
+                Number::New(isolate, data->channels)).ToChecked();
+                
+            audioInfo->Set(context,
+                String::NewFromUtf8(isolate, "numSamples").ToLocalChecked(),
+                Number::New(isolate, data->numSamples)).ToChecked();
+                
+            audioInfo->Set(context,
+                String::NewFromUtf8(isolate, "source").ToLocalChecked(),
+                String::NewFromUtf8(isolate, data->isSystemAudio ? "system" : "microphone").ToLocalChecked()).ToChecked();
+            
+            // Вызываем callback
+            Local<Value> argv[] = { audioInfo };
+            v8::TryCatch try_catch(isolate);
+            MaybeLocal<Value> result = jsCallback->Call(context, Null(isolate), 1, argv);
+            
+            if (try_catch.HasCaught()) {
+                String::Utf8Value error(isolate, try_catch.Exception());
+                NSLog(@"Error in audio callback: %s", *error);
+            }
+        }
+        
+        // Освобождаем память
+        if (data->audioData) {
+            free(data->audioData);
+        }
+        delete data;
+    }
+}
 
 
 void WorkAsync(uv_work_t* req) {
@@ -260,7 +365,7 @@ void TestMethod(const FunctionCallbackInfo<Value>& args) {
 }
 
 void SetCaptureSource(const FunctionCallbackInfo<Value>& args) {
-    NSLog(@"[DEBUG] SetCaptureSource called - using simplified version");
+    NSLog(@"[DEBUG] SetCaptureSource called");
     
     Isolate* isolate = args.GetIsolate();
     HandleScope scope(isolate);
@@ -269,33 +374,119 @@ void SetCaptureSource(const FunctionCallbackInfo<Value>& args) {
     auto resolver = Promise::Resolver::New(context).ToLocalChecked();
     args.GetReturnValue().Set(resolver->GetPromise());
     
-    // Используем дефолтные значения и не трогаем аргументы вообще
-    std::string typeStr = "display";
-    std::string idStr = "2077748985";  // Ваш display ID
+    // Проверяем количество аргументов
+    if (args.Length() < 2) {
+        NSLog(@"[ERROR] Need 2 arguments, got %d", args.Length());
+        resolver->Reject(context, 
+            String::NewFromUtf8(isolate, "Need type and id arguments").ToLocalChecked()).ToChecked();
+        return;
+    }
     
-    NSLog(@"[DEBUG] Using hardcoded values - type: '%s', id: '%s'", typeStr.c_str(), idStr.c_str());
-    NSLog(@"[DEBUG] Note: Arguments parsing temporarily disabled to avoid crash");
+    // Безопасное извлечение аргументов с TryCatch
+    v8::TryCatch try_catch(isolate);
+    
+    std::string typeStr;
+    std::string idStr;
+    
+    try {
+        // Получаем первый аргумент (type)
+        Local<Value> arg0 = args[0];
+        if (!arg0->IsString()) {
+            NSLog(@"[ERROR] First argument is not a string");
+            resolver->Reject(context, 
+                String::NewFromUtf8(isolate, "Type must be a string").ToLocalChecked()).ToChecked();
+            return;
+        }
+        
+        v8::String::Utf8Value typeValue(isolate, arg0);
+        if (*typeValue == nullptr) {
+            NSLog(@"[ERROR] Failed to convert type to string");
+            resolver->Reject(context, 
+                String::NewFromUtf8(isolate, "Failed to convert type").ToLocalChecked()).ToChecked();
+            return;
+        }
+        typeStr = std::string(*typeValue);
+        NSLog(@"[DEBUG] Type: %s", typeStr.c_str());
+        
+        // Получаем второй аргумент (id)
+        Local<Value> arg1 = args[1];
+        if (!arg1->IsString()) {
+            NSLog(@"[ERROR] Second argument is not a string");
+            resolver->Reject(context, 
+                String::NewFromUtf8(isolate, "ID must be a string").ToLocalChecked()).ToChecked();
+            return;
+        }
+        
+        v8::String::Utf8Value idValue(isolate, arg1);
+        if (*idValue == nullptr) {
+            NSLog(@"[ERROR] Failed to convert id to string");
+            resolver->Reject(context, 
+                String::NewFromUtf8(isolate, "Failed to convert id").ToLocalChecked()).ToChecked();
+            return;
+        }
+        idStr = std::string(*idValue);
+        NSLog(@"[DEBUG] ID: %s", idStr.c_str());
+        
+    } catch (...) {
+        NSLog(@"[ERROR] Exception while extracting arguments");
+        resolver->Reject(context, 
+            String::NewFromUtf8(isolate, "Exception extracting arguments").ToLocalChecked()).ToChecked();
+        return;
+    }
+    
+    if (try_catch.HasCaught()) {
+        NSLog(@"[ERROR] V8 exception caught");
+        resolver->Reject(context, 
+            String::NewFromUtf8(isolate, "V8 exception").ToLocalChecked()).ToChecked();
+        return;
+    }
+    
+    NSLog(@"[DEBUG] Successfully extracted - type: '%s', id: '%s'", typeStr.c_str(), idStr.c_str());
     
     // Создаем менеджер если нужно
     if (!g_manager) {
         NSLog(@"[DEBUG] Creating CCaptureManager");
-        g_manager = [[CCaptureManager alloc] init];
-        NSLog(@"[DEBUG] CCaptureManager created");
+        @try {
+            g_manager = [[CCaptureManager alloc] init];
+            NSLog(@"[DEBUG] CCaptureManager created successfully");
+        } @catch (NSException *exception) {
+            NSLog(@"[ERROR] Failed to create manager: %@", exception.reason);
+            resolver->Reject(context, 
+                String::NewFromUtf8(isolate, "Failed to create manager").ToLocalChecked()).ToChecked();
+            return;
+        }
     }
     
     // Создаем WorkData
-    WorkData* data = new WorkData();
-    data->isolate = isolate;
-    data->resolver.Reset(isolate, resolver);
-    data->operation = "setCaptureSource";
-    data->type = typeStr;
-    data->id = idStr;
+    WorkData* data = nullptr;
+    try {
+        data = new WorkData();
+        data->isolate = isolate;
+        data->resolver.Reset(isolate, resolver);
+        data->operation = "setCaptureSource";
+        data->type = typeStr;
+        data->id = idStr;
+        NSLog(@"[DEBUG] WorkData created successfully");
+    } catch (...) {
+        NSLog(@"[ERROR] Failed to create WorkData");
+        if (data) delete data;
+        resolver->Reject(context, 
+            String::NewFromUtf8(isolate, "Failed to create work data").ToLocalChecked()).ToChecked();
+        return;
+    }
     
-    NSLog(@"[DEBUG] WorkData created, queueing work...");
+    NSLog(@"[DEBUG] Queueing work...");
+    int result = uv_queue_work(uv_default_loop(), &data->request, WorkAsync, WorkAsyncComplete);
     
-    uv_queue_work(uv_default_loop(), &data->request, WorkAsync, WorkAsyncComplete);
+    if (result != 0) {
+        NSLog(@"[ERROR] uv_queue_work failed with code: %d", result);
+        delete data;
+        resolver->Reject(context, 
+            String::NewFromUtf8(isolate, "Failed to queue work").ToLocalChecked()).ToChecked();
+        return;
+    }
     
-    NSLog(@"[DEBUG] Work queued successfully");
+    NSLog(@"[DEBUG] SetCaptureSource completed successfully");
 }
 
 // Альтернативная версия - используем только числовые параметры
@@ -771,6 +962,14 @@ void SetWebRTCAudioCallback(const FunctionCallbackInfo<Value>& args) {
     if (!g_manager) {
         g_manager = [[CCaptureManager alloc] init];
     }
+
+    // Инициализируем uv_async если еще не сделали
+    static bool asyncInitialized = false;
+    if (!asyncInitialized) {
+        uv_async_init(uv_default_loop(), &g_audio_async, ProcessAudioCallback);
+        asyncInitialized = true;
+        NSLog(@"✅ UV async initialized");
+    }
     
     // Проверяем, что передана функция
     if (args.Length() < 1 || !args[0]->IsFunction()) {
@@ -898,116 +1097,34 @@ void SetWebRTCAudioCallback(const FunctionCallbackInfo<Value>& args) {
         
         // Сохраняем определенный источник для использования в dispatch_async
         bool isMicrophoneSource = !isSystemAudio;
+
+        // ДОБАВЛЯЕМ ЛОГИРОВАНИЕ ЗДЕСЬ
+        NSLog(@"🔥 Before dispatch_async, audioDataSize: %zu", audioDataSize);
         
-        // Вызываем JavaScript callback из главного потока
-        dispatch_async(dispatch_get_main_queue(), ^{
-            Isolate* isolate = Isolate::GetCurrent();
-            if (!isolate) {
-                if (audioDataPtr) free(audioDataPtr);
-                return;
-            }
-            
-            HandleScope scope(isolate);
-            Local<Context> context = isolate->GetCurrentContext();
-            
-            // Get the saved callback
-            Local<Function> jsCallback = Local<Function>::New(isolate, *persistentCallback);
-            
-            // Create object with audio info
-            Local<Object> audioInfo = Object::New(isolate);
-            
-            // CRITICAL FIX: Always include the audio data as ArrayBuffer
-            if (audioDataPtr && audioDataSize > 0) {
-                // Create ArrayBuffer and copy data
-                Local<ArrayBuffer> arrayBuffer = ArrayBuffer::New(isolate, audioDataSize);
-                void* bufferData = arrayBuffer->GetBackingStore()->Data();
-                memcpy(bufferData, audioDataPtr, audioDataSize);
-                
-                // Add the data field - THIS IS WHAT WAS MISSING
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "data").ToLocalChecked(),
-                    arrayBuffer).ToChecked();
-                
-                // Add a flag to indicate we have real data
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "hasData").ToLocalChecked(),
-                    v8::Boolean::New(isolate, true)).ToChecked();
-                
-                // Add the byte length for verification
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "dataByteLength").ToLocalChecked(),
-                    Number::New(isolate, static_cast<double>(audioDataSize))).ToChecked();
-            } else {
-                // Create empty ArrayBuffer if no data
-                Local<ArrayBuffer> emptyBuffer = ArrayBuffer::New(isolate, 0);
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "data").ToLocalChecked(),
-                    emptyBuffer).ToChecked();
-                
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "hasData").ToLocalChecked(),
-                    v8::Boolean::New(isolate, false)).ToChecked();
-                
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "dataByteLength").ToLocalChecked(),
-                    Number::New(isolate, 0)).ToChecked();
-            }
-            
-            // Add format information if available
-            if (hasFormat) {
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "sampleRate").ToLocalChecked(),
-                    Number::New(isolate, asbd.mSampleRate)).ToChecked();
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "channels").ToLocalChecked(),
-                    Number::New(isolate, asbd.mChannelsPerFrame)).ToChecked();
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "bitsPerChannel").ToLocalChecked(),
-                    Number::New(isolate, asbd.mBitsPerChannel)).ToChecked();
-            } else {
-                // Default values if no format
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "sampleRate").ToLocalChecked(),
-                    Number::New(isolate, 48000)).ToChecked();
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "channels").ToLocalChecked(),
-                    Number::New(isolate, 2)).ToChecked();
-            }
-            
-            // Add other metadata
-            audioInfo->Set(context,
-                String::NewFromUtf8(isolate, "timestamp").ToLocalChecked(),
-                Number::New(isolate, timestamp)).ToChecked();
-            
-            audioInfo->Set(context,
-                String::NewFromUtf8(isolate, "numSamples").ToLocalChecked(),
-                Number::New(isolate, numSamples)).ToChecked();
-            
-            audioInfo->Set(context,
-                String::NewFromUtf8(isolate, "frameNumber").ToLocalChecked(),
-                Number::New(isolate, static_cast<double>(frameNumber))).ToChecked();
-            
-            // Add source type
-            audioInfo->Set(context,
-                String::NewFromUtf8(isolate, "source").ToLocalChecked(),
-                String::NewFromUtf8(isolate, isMicrophoneSource ? "microphone" : "system").ToLocalChecked()).ToChecked();
-            
-            // Clean up
-            if (audioDataPtr) {
-                free(audioDataPtr);
-            }
-            
-            // Call the JavaScript callback
-            Local<Value> argv[] = { audioInfo };
-            
-            v8::TryCatch try_catch(isolate);
-            MaybeLocal<Value> result = jsCallback->Call(context, Null(isolate), 1, argv);
-            
-            if (try_catch.HasCaught()) {
-                String::Utf8Value error(isolate, try_catch.Exception());
-                NSLog(@"Error in audio callback: %s", *error);
-            }
-        });
+        NSLog(@"🔥 Queueing audio data for main thread");
+        
+        // Создаем структуру с данными
+        AudioCallbackData* callbackData = new AudioCallbackData();
+        callbackData->callback = persistentCallback;
+        callbackData->audioData = audioDataPtr;  // Передаем владение
+        callbackData->audioDataSize = audioDataSize;
+        callbackData->timestamp = timestamp;
+        callbackData->numSamples = numSamples;
+        callbackData->sampleRate = hasFormat ? asbd.mSampleRate : 48000;
+        callbackData->channels = hasFormat ? asbd.mChannelsPerFrame : 2;
+        callbackData->isSystemAudio = isSystemAudio;
+        callbackData->frameNumber = frameNumber;
+        
+        // Добавляем в очередь
+        {
+            std::lock_guard<std::mutex> lock(g_audio_mutex);
+            g_audio_queue.push(callbackData);
+        }
+        
+        // Сигнализируем главному потоку
+        uv_async_send(&g_audio_async);
+        
+        NSLog(@"🔥 Audio data queued successfully");
     }];
     
     args.GetReturnValue().Set(String::NewFromUtf8(isolate, "WebRTC audio callback set").ToLocalChecked());

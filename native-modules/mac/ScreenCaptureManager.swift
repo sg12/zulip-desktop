@@ -481,21 +481,29 @@ actor CaptureActor {
             throw RecordingError("No screen capture permission")
         }
         
-        // Для режима audioOnly не требуется contentFilter
+        // Для режима audioOnly создаем минимальный фильтр
         if captureMode == .audioOnly {
-            print("🎵 Audio-only mode - skipping video setup")
-            // Создаем минимальный фильтр для аудио
-            if let mainDisplay = try? await getMainDisplay() {
+            print("🎵 Audio-only mode - creating minimal filter")
+            // Получаем основной дисплей для создания минимального фильтра
+            let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+            if let mainDisplay = content.displays.first {
                 contentFilter = SCContentFilter(display: mainDisplay, excludingApplications: [], exceptingWindows: [])
+                // Сохраняем размеры дисплея для конфигурации
+                captureWidth = mainDisplay.width
+                captureHeight = mainDisplay.height
+                print("✅ Created minimal filter for audio-only mode (display: \(captureWidth)x\(captureHeight))")
+            } else {
+                throw RecordingError("No display available for audio capture")
             }
         } else {
             // Проверка contentFilter для видео режимов
-            guard let filter = contentFilter else {
-                print("❌ No content filter set")
+            guard contentFilter != nil else {
+                print("❌ No content filter set for video mode")
                 throw RecordingError("No content filter available")
             }
         }
         
+        // Теперь проверяем что фильтр точно есть
         guard let filter = contentFilter else {
             throw RecordingError("No content filter available")
         }
@@ -503,8 +511,18 @@ actor CaptureActor {
         // Создаем конфигурацию потока
         let streamConfig = SCStreamConfiguration()
         
-        // Настройки видео только если нужно
-        if captureMode == .audioAndVideo || captureMode == .videoOnly {
+        // ВАЖНО: Даже для audio-only используем реальные размеры
+        // Иначе SCStream может не создаться
+        if captureMode == .audioOnly {
+            // Используем низкое разрешение для экономии ресурсов, но не 1x1
+            streamConfig.width = 16
+            streamConfig.height = 16
+            streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: 1) // 1 fps
+            streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
+            streamConfig.showsCursor = false
+            streamConfig.queueDepth = 1 // Минимальная очередь
+            print("🎵 Audio-only mode: using 640x480 @ 1fps for compatibility")
+        } else if captureMode == .audioAndVideo || captureMode == .videoOnly {
             streamConfig.width = requestedWidth
             streamConfig.height = requestedHeight
             let frameInterval = CMTime(value: 1, timescale: CMTimeScale(requestedFPS))
@@ -513,12 +531,6 @@ actor CaptureActor {
             streamConfig.showsCursor = true
             streamConfig.queueDepth = requestedWidth <= 640 ? 2 : 3
             print("📹 Video configured: \(requestedWidth)x\(requestedHeight) @ \(requestedFPS) fps")
-        } else {
-            // Минимальные настройки для audio-only
-            streamConfig.width = 1
-            streamConfig.height = 1
-            streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-            print("🎵 Audio-only mode: minimal video config")
         }
         
         // Настройки аудио
@@ -529,16 +541,25 @@ actor CaptureActor {
                 streamConfig.sampleRate = 48000
                 streamConfig.channelCount = 2
                 print("🎵 Audio configured: 48kHz, 2 channels")
+            } else {
+                print("⚠️ Audio capture requires macOS 13.0 or later")
+                throw RecordingError("Audio capture requires macOS 13.0 or later")
             }
         }
         
         print("📋 Creating SCStream with configuration")
+        print("   Filter: \(filter)")
+        print("   Config: width=\(streamConfig.width), height=\(streamConfig.height)")
         
         do {
             let streamLocal = SCStream(filter: filter, configuration: streamConfig, delegate: outputDelegate)
             
-            // Добавляем обработчики в зависимости от режима
-            if captureMode == .audioAndVideo || captureMode == .videoOnly {
+            // ВАЖНО: Для audio-only тоже добавляем screen output, но с минимальными настройками
+            // Это нужно чтобы поток вообще запустился
+            if captureMode == .audioOnly {
+                print("🎵 Adding minimal screen output for audio-only mode")
+                try streamLocal.addStreamOutput(outputDelegate, type: .screen, sampleHandlerQueue: sampleBufferQueue)
+            } else if captureMode == .audioAndVideo || captureMode == .videoOnly {
                 print("📹 Adding video output handler")
                 try streamLocal.addStreamOutput(outputDelegate, type: .screen, sampleHandlerQueue: sampleBufferQueue)
             }
@@ -548,8 +569,10 @@ actor CaptureActor {
                     print("🎵 Adding audio output handler")
                     do {
                         try streamLocal.addStreamOutput(outputDelegate, type: .audio, sampleHandlerQueue: sampleBufferQueue)
+                        print("✅ Audio output handler added successfully")
                     } catch {
                         print("⚠️ Audio not added: \(error)")
+                        throw error
                     }
                 }
             }
@@ -565,6 +588,7 @@ actor CaptureActor {
             
         } catch {
             print("❌ Failed to start capture: \(error)")
+            print("   Error details: \(error.localizedDescription)")
             self.stream = nil
             isCapturing = false
             isStreaming = false
@@ -668,14 +692,14 @@ actor CaptureActor {
                     let channelCount = asbd.pointee.mChannelsPerFrame
                     let sampleRate = asbd.pointee.mSampleRate
                     let formatID = asbd.pointee.mFormatID
-                    //print("🎵 Audio format - Channels: \(channelCount), Sample Rate: \(sampleRate), Format: \(formatID)")
+                    print("🎵 Audio format - Channels: \(channelCount), Sample Rate: \(sampleRate), Format: \(formatID)")
                     
-                    // Проверяем формат аудио
-                    // if formatID == kAudioFormatLinearPCM {
-                    //     print("🎵 Audio is Linear PCM - good for processing")
-                    // } else {
-                    //     print("⚠️ Audio format is not Linear PCM: \(formatID)")
-                    // }
+                    //Проверяем формат аудио
+                    if formatID == kAudioFormatLinearPCM {
+                        print("🎵 Audio is Linear PCM - good for processing")
+                    } else {
+                        print("⚠️ Audio format is not Linear PCM: \(formatID)")
+                    }
                 }
             }
             
