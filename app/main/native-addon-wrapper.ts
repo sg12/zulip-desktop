@@ -41,6 +41,8 @@ export class NativeAddonWrapper {
     private platform: string;
     private isLoaded: boolean = false;
     private addonPath: string | null = null;
+    private audioFrameCount: number = 0;
+    private videoFrameCount: number = 0;
 
     constructor() {
         this.platform = process.platform;
@@ -67,6 +69,7 @@ export class NativeAddonWrapper {
                         path.join(__dirname, 'screen_capture_win.node'),
                         path.join(__dirname, '..', 'dist-electron', 'screen_capture_win.node'),
                         path.join(process.cwd(), 'dist-electron', 'screen_capture_win.node'),
+                        path.join(process.cwd(), 'native-modules', 'win', 'build', 'Release', 'screen_capture_win.node'),
                         path.join(process.cwd(), 'native-modules', 'win', 'build', 'screen_capture_win.node')
                     ]
                 },
@@ -118,6 +121,128 @@ export class NativeAddonWrapper {
     }
 
     private createUnifiedAddon(rawAddon: any): UnifiedNativeAddon {
+        // Для macOS используем специальную обработку callbacks
+        if (this.platform === 'darwin') {
+            return {
+                testMethod: rawAddon.testMethod,
+                testBasic: rawAddon.testBasic,
+                getAvailableSources: rawAddon.getAvailableSources,
+                setCaptureSource: rawAddon.setCaptureSource,
+                setCaptureSourceById: rawAddon.setCaptureSourceById,
+                setCaptureQuality: rawAddon.setCaptureQuality,
+                startCapture: rawAddon.startCapture,
+                stopCapture: rawAddon.stopCapture,
+                startAudioOnlyCapture: rawAddon.startAudioOnlyCapture,
+                startAudioVideoCapture: rawAddon.startAudioVideoCapture,
+                getFrameStats: rawAddon.getFrameStats,
+                
+                // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обработка video callback
+                setWebRTCVideoCallback: (callback: (data: any) => void) => {
+                    if (rawAddon.setWebRTCVideoCallback) {
+                        rawAddon.setWebRTCVideoCallback((frameData: any) => {
+                            this.videoFrameCount++;
+                            
+                            // Проверяем формат данных
+                            if (this.videoFrameCount <= 3) {
+                                log.info(`[Video Frame ${this.videoFrameCount}] Structure:`, {
+                                    hasData: !!frameData?.data,
+                                    dataType: typeof frameData?.data,
+                                    dataByteLength: frameData?.data?.byteLength,
+                                    width: frameData?.width,
+                                    height: frameData?.height
+                                });
+                            }
+                            
+                            // Передаем данные дальше
+                            callback(frameData);
+                        });
+                    }
+                },
+                
+                // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обработка audio callback
+                setWebRTCAudioCallback: (callback: (data: any) => void) => {
+                    if (rawAddon.setWebRTCAudioCallback) {
+                        rawAddon.setWebRTCAudioCallback((audioData: any) => {
+                            this.audioFrameCount++;
+                            
+                            // Детальная диагностика для первых кадров
+                            if (this.audioFrameCount <= 3) {
+                                log.info(`[Audio Frame ${this.audioFrameCount}] Raw data structure:`, {
+                                    hasData: !!audioData?.data,
+                                    dataType: typeof audioData?.data,
+                                    dataConstructor: audioData?.data?.constructor?.name,
+                                    dataByteLength: audioData?.data?.byteLength || audioData?.dataByteLength,
+                                    hasDataField: 'data' in (audioData || {}),
+                                    sampleRate: audioData?.sampleRate,
+                                    channels: audioData?.channels,
+                                    source: audioData?.source,
+                                    allKeys: Object.keys(audioData || {})
+                                });
+                            }
+                            
+                            // ВАЖНО: Проверяем и нормализуем данные
+                            let normalizedData: any = {
+                                sampleRate: audioData?.sampleRate || 48000,
+                                channels: audioData?.channels || 2,
+                                numSamples: audioData?.numSamples || 960,
+                                source: audioData?.source || 'unknown',
+                                timestamp: audioData?.timestamp || Date.now(),
+                                frameNumber: this.audioFrameCount
+                            };
+                            
+                            // Проверяем наличие аудио данных в разных форматах
+                            if (audioData?.data) {
+                                // Данные в поле data
+                                normalizedData.data = audioData.data;
+                                normalizedData.hasData = true;
+                                normalizedData.dataByteLength = audioData.data.byteLength || 0;
+                                
+                                if (this.audioFrameCount === 1) {
+                                    log.info('✅ Audio data found in "data" field');
+                                }
+                            } else if (audioData?.audioData) {
+                                // Данные могут быть в поле audioData
+                                normalizedData.data = audioData.audioData;
+                                normalizedData.hasData = true;
+                                normalizedData.dataByteLength = audioData.audioData.byteLength || 0;
+                                
+                                if (this.audioFrameCount === 1) {
+                                    log.info('✅ Audio data found in "audioData" field');
+                                }
+                            } else if (audioData instanceof ArrayBuffer) {
+                                // Сами данные являются ArrayBuffer
+                                normalizedData.data = audioData;
+                                normalizedData.hasData = true;
+                                normalizedData.dataByteLength = audioData.byteLength;
+                                
+                                if (this.audioFrameCount === 1) {
+                                    log.info('✅ Audio data IS the ArrayBuffer');
+                                }
+                            } else {
+                                // Нет данных
+                                normalizedData.data = new ArrayBuffer(0);
+                                normalizedData.hasData = false;
+                                normalizedData.dataByteLength = 0;
+                                
+                                if (this.audioFrameCount <= 3) {
+                                    log.warn(`⚠️ No audio data in frame ${this.audioFrameCount}`);
+                                    log.warn('Available fields:', Object.keys(audioData || {}));
+                                }
+                            }
+                            
+                            // Логируем каждый 100-й кадр для мониторинга
+                            if (this.audioFrameCount % 100 === 0) {
+                                log.info(`Audio frames: ${this.audioFrameCount}, Last frame size: ${normalizedData.dataByteLength} bytes`);
+                            }
+                            
+                            // Передаем нормализованные данные
+                            callback(normalizedData);
+                        });
+                    }
+                }
+            };
+        }
+        
         // Для Windows модуля может потребоваться адаптация
         if (this.platform === 'win32') {
             return {
@@ -197,7 +322,7 @@ export class NativeAddonWrapper {
             };
         }
         
-        // Для macOS используем напрямую (уже совместимо)
+        // Для других платформ
         return rawAddon as UnifiedNativeAddon;
     }
 
@@ -311,7 +436,10 @@ export class NativeAddonWrapper {
                         data: new ArrayBuffer(960 * 2 * 4),
                         sampleRate: 48000,
                         channels: 2,
-                        numSamples: 960
+                        numSamples: 960,
+                        hasData: true,
+                        dataByteLength: 960 * 2 * 4,
+                        source: 'mock'
                     };
                     callback(mockData);
                 }, 20);
@@ -343,7 +471,9 @@ export class NativeAddonWrapper {
             path: this.addonPath,
             available: this.isAvailable(),
             methodCount: methods.length,
-            methods: methods
+            methods: methods,
+            audioFrames: this.audioFrameCount,
+            videoFrames: this.videoFrameCount
         };
     }
 }

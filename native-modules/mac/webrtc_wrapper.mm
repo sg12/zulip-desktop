@@ -910,13 +910,50 @@ void SetWebRTCAudioCallback(const FunctionCallbackInfo<Value>& args) {
             HandleScope scope(isolate);
             Local<Context> context = isolate->GetCurrentContext();
             
-            // Получаем сохраненный callback
+            // Get the saved callback
             Local<Function> jsCallback = Local<Function>::New(isolate, *persistentCallback);
             
-            // Создаем объект с информацией об аудио
+            // Create object with audio info
             Local<Object> audioInfo = Object::New(isolate);
             
-            // Добавляем информацию о формате если есть
+            // CRITICAL FIX: Always include the audio data as ArrayBuffer
+            if (audioDataPtr && audioDataSize > 0) {
+                // Create ArrayBuffer and copy data
+                Local<ArrayBuffer> arrayBuffer = ArrayBuffer::New(isolate, audioDataSize);
+                void* bufferData = arrayBuffer->GetBackingStore()->Data();
+                memcpy(bufferData, audioDataPtr, audioDataSize);
+                
+                // Add the data field - THIS IS WHAT WAS MISSING
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "data").ToLocalChecked(),
+                    arrayBuffer).ToChecked();
+                
+                // Add a flag to indicate we have real data
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "hasData").ToLocalChecked(),
+                    v8::Boolean::New(isolate, true)).ToChecked();
+                
+                // Add the byte length for verification
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "dataByteLength").ToLocalChecked(),
+                    Number::New(isolate, static_cast<double>(audioDataSize))).ToChecked();
+            } else {
+                // Create empty ArrayBuffer if no data
+                Local<ArrayBuffer> emptyBuffer = ArrayBuffer::New(isolate, 0);
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "data").ToLocalChecked(),
+                    emptyBuffer).ToChecked();
+                
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "hasData").ToLocalChecked(),
+                    v8::Boolean::New(isolate, false)).ToChecked();
+                
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "dataByteLength").ToLocalChecked(),
+                    Number::New(isolate, 0)).ToChecked();
+            }
+            
+            // Add format information if available
             if (hasFormat) {
                 audioInfo->Set(context,
                     String::NewFromUtf8(isolate, "sampleRate").ToLocalChecked(),
@@ -927,12 +964,17 @@ void SetWebRTCAudioCallback(const FunctionCallbackInfo<Value>& args) {
                 audioInfo->Set(context,
                     String::NewFromUtf8(isolate, "bitsPerChannel").ToLocalChecked(),
                     Number::New(isolate, asbd.mBitsPerChannel)).ToChecked();
+            } else {
+                // Default values if no format
                 audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "formatID").ToLocalChecked(),
-                    Number::New(isolate, asbd.mFormatID)).ToChecked();
+                    String::NewFromUtf8(isolate, "sampleRate").ToLocalChecked(),
+                    Number::New(isolate, 48000)).ToChecked();
+                audioInfo->Set(context,
+                    String::NewFromUtf8(isolate, "channels").ToLocalChecked(),
+                    Number::New(isolate, 2)).ToChecked();
             }
             
-            // Добавляем основные данные
+            // Add other metadata
             audioInfo->Set(context,
                 String::NewFromUtf8(isolate, "timestamp").ToLocalChecked(),
                 Number::New(isolate, timestamp)).ToChecked();
@@ -945,45 +987,23 @@ void SetWebRTCAudioCallback(const FunctionCallbackInfo<Value>& args) {
                 String::NewFromUtf8(isolate, "frameNumber").ToLocalChecked(),
                 Number::New(isolate, static_cast<double>(frameNumber))).ToChecked();
             
-            // Добавляем аудио данные если есть
-            if (audioDataPtr && audioDataSize > 0) {
-                // Создаем ArrayBuffer и копируем данные
-                Local<ArrayBuffer> arrayBuffer = ArrayBuffer::New(isolate, audioDataSize);
-                void* bufferData = arrayBuffer->GetBackingStore()->Data();
-                memcpy(bufferData, audioDataPtr, audioDataSize);
-                
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "data").ToLocalChecked(),
-                    arrayBuffer).ToChecked();
-                
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "dataSize").ToLocalChecked(),
-                    Number::New(isolate, static_cast<double>(audioDataSize))).ToChecked();
-                
-                // Указываем источник на основе анализа
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "source").ToLocalChecked(),
-                    String::NewFromUtf8(isolate, isMicrophoneSource ? "microphone" : "system").ToLocalChecked()).ToChecked();
-                
-                // Добавляем дополнительную информацию для отладки
-                audioInfo->Set(context,
-                    String::NewFromUtf8(isolate, "hasBlockBuffer").ToLocalChecked(),
-                    v8::Boolean::New(isolate, hasBlockBuffer)).ToChecked();
-            }
+            // Add source type
+            audioInfo->Set(context,
+                String::NewFromUtf8(isolate, "source").ToLocalChecked(),
+                String::NewFromUtf8(isolate, isMicrophoneSource ? "microphone" : "system").ToLocalChecked()).ToChecked();
             
-            // Освобождаем память
+            // Clean up
             if (audioDataPtr) {
                 free(audioDataPtr);
             }
             
-            // Вызываем JavaScript callback
+            // Call the JavaScript callback
             Local<Value> argv[] = { audioInfo };
             
             v8::TryCatch try_catch(isolate);
             MaybeLocal<Value> result = jsCallback->Call(context, Null(isolate), 1, argv);
             
             if (try_catch.HasCaught()) {
-                // Логируем ошибку но не крашимся
                 String::Utf8Value error(isolate, try_catch.Exception());
                 NSLog(@"Error in audio callback: %s", *error);
             }

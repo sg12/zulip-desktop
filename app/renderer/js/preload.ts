@@ -4,23 +4,48 @@ import * as NetworkError from "./pages/network.js";
 import { ipcRenderer } from "./typed-ipc-renderer.js";
 import { WalkieTalkieStatus } from "../../common/typed-ipc.js";
 
-ipcRenderer.send("preload-log", "✅ Preload: Начало выполнения");
-ipcRenderer.send("preload-log", `✅ Preload: Загружен для URL: ${window.location.href}`);
+// ====================================
+// РАСШИРЕННОЕ ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ
+// ====================================
+ipcRenderer.send("preload-log", "====================================");
+ipcRenderer.send("preload-log", "PRELOAD STARTED");
+ipcRenderer.send("preload-log", `Platform: ${process.platform}`);
+ipcRenderer.send("preload-log", `URL: ${window.location.href}`);
+ipcRenderer.send("preload-log", `Process type: ${process.type}`);
+ipcRenderer.send("preload-log", `Node version: ${process.versions.node}`);
+ipcRenderer.send("preload-log", `Electron version: ${process.versions.electron}`);
+ipcRenderer.send("preload-log", "====================================");
+
+// Обработчики для отладки native захвата
+electron_bridge.on_event("native-capture-status", (status: any) => {
+    ipcRenderer.send("preload-log", `🔊 [NATIVE-CAPTURE] Status: ${JSON.stringify(status)}`);
+});
+
+electron_bridge.on_event("native-audio-frame", (data: any) => {
+    ipcRenderer.send("preload-log", `🔊 [NATIVE-AUDIO] Frame received: size=${data?.byteLength}, source=${data?.source}`);
+});
+
+electron_bridge.on_event("screen-share-started", (data: any) => {
+    ipcRenderer.send("preload-log", `🖥️ [SCREEN-SHARE] Started: ${JSON.stringify(data)}`);
+});
+
+electron_bridge.on_event("screen-share-stopped", () => {
+    ipcRenderer.send("preload-log", `🖥️ [SCREEN-SHARE] Stopped`);
+});
 
 // === ОСНОВНОЕ: Обработчик запроса источников ===
-// ЭТО КРИТИЧНО! Без этого диалог будет пустой
 electron_bridge.on_event("requestDesktopSources", async () => {
-    ipcRenderer.send("preload-log", "🎯 [PRELOAD_DEBUG] requestDesktopSources event received! КРИТИЧНО!");
+    ipcRenderer.send("preload-log", "🎯 [PRELOAD_DEBUG] requestDesktopSources event received!");
     
     try {
         // Запрашиваем источники через IPC
         const sources = await ipcRenderer.invoke('get-desktop-sources');
-        ipcRenderer.send("preload-log", `🎯 [PRELOAD_DEBUG] Got ${sources.length} sources from main process via invoke`);
+        ipcRenderer.send("preload-log", `🎯 [PRELOAD_DEBUG] Got ${sources.length} sources from main process`);
         
         if (sources && sources.length > 0) {
             // Логируем источники
             sources.forEach((source: any, i: number) => {
-                ipcRenderer.send("preload-log", `🎯 Preload: Source ${i}: ${source.name} (${source.id})`);
+                ipcRenderer.send("preload-log", `🎯 Source ${i}: ${source.name} (${source.id})`);
             });
             
             // Подготавливаем объект ответа
@@ -29,13 +54,9 @@ electron_bridge.on_event("requestDesktopSources", async () => {
                 error: null
             };
 
-            // КРИТИЧНО: Отправляем ответ через electron_bridge
-            // Это нужно для других частей системы, которые могут слушать electron_bridge
+            // Отправляем ответ через electron_bridge
             electron_bridge.send_event("desktop-sources-response", responseToSend);
             ipcRenderer.send("preload-log", "✅ Preload: Sources sent via electron_bridge");
-            
-            // НЕ НУЖНО отправлять через ipcRenderer.send, потому что main process уже отправил
-            // через webContents.send, и Jitsi его получил.
             
         } else {
             ipcRenderer.send("preload-log", "⚠️ Preload: No sources received!");
@@ -44,7 +65,6 @@ electron_bridge.on_event("requestDesktopSources", async () => {
                 error: "No sources available"
             };
             electron_bridge.send_event("desktop-sources-response", errorResponse);
-            // main process тоже отправил ошибку через webContents.send
         }
         
     } catch (error: any) {
@@ -54,20 +74,16 @@ electron_bridge.on_event("requestDesktopSources", async () => {
             error: error.message
         };
         electron_bridge.send_event("desktop-sources-response", errorResponse);
-        // main process тоже отправил ошибку через webContents.send
     }
 });
 
-
-// === ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ===
-
-// Walkie-talkie
+// === WALKIE-TALKIE ===
 ipcRenderer.on("toggle-walkie-talkie", (event, isMuted: boolean) => {
     ipcRenderer.send("preload-log", `Preload: toggle-walkie-talkie: isMuted=${isMuted}`);
     bridgeEvents.emit("toggle-walkie-talkie", isMuted);
 });
 
-// Expose electron_bridge
+// === EXPOSE ELECTRON_BRIDGE ===
 contextBridge.exposeInMainWorld("electron_bridge", {
     ...electron_bridge,
     setMicHotkey: (enabled: boolean, hotkey: string) => {
@@ -79,7 +95,61 @@ contextBridge.exposeInMainWorld("electron_bridge", {
     }
 });
 
-// Expose screen capture API
+// === NATIVE AUDIO DEBUG API ===
+contextBridge.exposeInMainWorld('nativeAudioDebug', {
+    checkAudioCapture: async () => {
+        ipcRenderer.send("preload-log", "🔊 [DEBUG] Checking audio capture status...");
+        
+        try {
+            // Проверяем статус native модуля
+            const moduleStatus = await ipcRenderer.invoke('test-native-audio');
+            ipcRenderer.send("preload-log", `🔊 [DEBUG] Module status: ${JSON.stringify(moduleStatus)}`);
+            
+            // Проверяем статус захвата
+            const captureStatus = await ipcRenderer.invoke('get-capture-status');
+            ipcRenderer.send("preload-log", `🔊 [DEBUG] Capture status: ${JSON.stringify(captureStatus)}`);
+            
+            return {
+                module: moduleStatus,
+                capture: captureStatus
+            };
+        } catch (error: any) {
+            ipcRenderer.send("preload-log", `❌ [DEBUG] Error: ${error.message}`);
+            return { error: error.message };
+        }
+    },
+    
+    testAudioStream: async () => {
+        ipcRenderer.send("preload-log", "🔊 [DEBUG] Testing audio stream...");
+        
+        try {
+            // Запускаем тестовый захват
+            const startResult = await ipcRenderer.invoke('start-native-capture', 'screen:1:0');
+            ipcRenderer.send("preload-log", `🔊 [DEBUG] Start result: ${JSON.stringify(startResult)}`);
+            
+            // Ждем 3 секунды и проверяем
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            const status = await ipcRenderer.invoke('get-capture-status');
+            ipcRenderer.send("preload-log", `🔊 [DEBUG] After 3s: ${JSON.stringify(status)}`);
+            
+            // Останавливаем
+            const stopResult = await ipcRenderer.invoke('stop-native-capture');
+            ipcRenderer.send("preload-log", `🔊 [DEBUG] Stop result: ${JSON.stringify(stopResult)}`);
+            
+            return { 
+                started: startResult,
+                status: status,
+                stopped: stopResult
+            };
+        } catch (error: any) {
+            ipcRenderer.send("preload-log", `❌ [DEBUG] Test error: ${error.message}`);
+            return { error: error.message };
+        }
+    }
+});
+
+// === SCREEN CAPTURE API С ЛОГИРОВАНИЕМ ===
 contextBridge.exposeInMainWorld('screenCapture', {
     startCapture: async (options: {
         sourceId: string;
@@ -87,44 +157,60 @@ contextBridge.exposeInMainWorld('screenCapture', {
         height: number;
         frameRate: number;
     }) => {
+        ipcRenderer.send("preload-log", `📹 [SCREEN-CAPTURE] Starting with options: ${JSON.stringify(options)}`);
+        
         try {
             const response = await ipcRenderer.invoke("screen-capture-start", options);
+            ipcRenderer.send("preload-log", `📹 [SCREEN-CAPTURE] Start response: ${JSON.stringify(response)}`);
+            
             if (response.success) {
+                ipcRenderer.send("preload-log", `📹 [SCREEN-CAPTURE] Audio enabled: ${response.hasAudio || false}`);
                 return response.result;
             } else {
                 throw new Error(response.error);
             }
         } catch (error: any) {
+            ipcRenderer.send("preload-log", `❌ [SCREEN-CAPTURE] Start error: ${error.message}`);
             throw error;
         }
     },
     
     stopCapture: async () => {
+        ipcRenderer.send("preload-log", `📹 [SCREEN-CAPTURE] Stopping capture...`);
+        
         try {
             const response = await ipcRenderer.invoke("screen-capture-stop");
+            ipcRenderer.send("preload-log", `📹 [SCREEN-CAPTURE] Stop response: ${JSON.stringify(response)}`);
+            
             if (!response.success) {
                 throw new Error(response.error);
             }
         } catch (error: any) {
+            ipcRenderer.send("preload-log", `❌ [SCREEN-CAPTURE] Stop error: ${error.message}`);
             throw error;
         }
     },
     
     testMethod: async () => {
+        ipcRenderer.send("preload-log", `📹 [SCREEN-CAPTURE] Testing method...`);
+        
         try {
             const response = await ipcRenderer.invoke("screen-capture-test");
+            ipcRenderer.send("preload-log", `📹 [SCREEN-CAPTURE] Test response: ${JSON.stringify(response)}`);
+            
             if (response.success) {
                 return response.result;
             } else {
                 throw new Error(response.error);
             }
         } catch (error: any) {
+            ipcRenderer.send("preload-log", `❌ [SCREEN-CAPTURE] Test error: ${error.message}`);
             return "Error calling test method";
         }
     }
 });
 
-// Expose ipcRenderer for Zulip
+// === EXPOSE IPC RENDERER ДЛЯ ZULIP ===
 contextBridge.exposeInMainWorld("ipcRenderer", {
     invoke: async (channel: any, ...args: unknown[]) => {
         ipcRenderer.send("preload-log", `Zulip: ipcRenderer.invoke ${channel}`);
@@ -141,7 +227,7 @@ contextBridge.exposeInMainWorld("ipcRenderer", {
     }
 });
 
-// === ОСТАЛЬНЫЕ ОБРАБОТЧИКИ СОБЫТИЙ ===
+// === ОБРАБОТЧИКИ СОБЫТИЙ ===
 
 ipcRenderer.on("logout", () => {
     bridgeEvents.emit("logout");
@@ -186,6 +272,54 @@ ipcRenderer.on("forward-message", (event, channel) => {
     }
 });
 
+// Проверка аудио в Jitsi
+ipcRenderer.on("check-jitsi-audio", async () => {
+    ipcRenderer.send("preload-log", "🔊 [JITSI] Checking audio in Jitsi context...");
+    
+    // Проверяем есть ли активный stream
+    if (window.jitsiNativeMediaStream) {
+        const stream = window.jitsiNativeMediaStream;
+        const audioTracks = stream.getAudioTracks();
+        
+        ipcRenderer.send("preload-log", `🔊 [JITSI] Stream found: ${stream.id}`);
+        ipcRenderer.send("preload-log", `🔊 [JITSI] Audio tracks: ${audioTracks.length}`);
+        
+        audioTracks.forEach((track, i) => {
+            ipcRenderer.send("preload-log", `🔊 [JITSI] Track ${i}: ${track.label}, enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`);
+        });
+    } else {
+        ipcRenderer.send("preload-log", "❌ [JITSI] No jitsiNativeMediaStream found");
+    }
+});
+
+// === МОНИТОРИНГ АУДИО ===
+let audioCheckInterval: NodeJS.Timer | null = null;
+
+electron_bridge.on_event("start-audio-monitoring", () => {
+    ipcRenderer.send("preload-log", "🔊 [MONITOR] Starting audio monitoring...");
+    
+    if (audioCheckInterval) clearInterval(audioCheckInterval);
+    
+    let frameCount = 0;
+    audioCheckInterval = setInterval(async () => {
+        frameCount++;
+        
+        if (frameCount % 10 === 0) { // Каждые 10 секунд
+            const status = await ipcRenderer.invoke('get-capture-status');
+            ipcRenderer.send("preload-log", `🔊 [MONITOR] Status at ${frameCount}s: audioFrames=${status.audioFrames}, videoFrames=${status.videoFrames}`);
+        }
+    }, 1000);
+});
+
+electron_bridge.on_event("stop-audio-monitoring", () => {
+    ipcRenderer.send("preload-log", "🔊 [MONITOR] Stopping audio monitoring");
+    if (audioCheckInterval) {
+        clearInterval(audioCheckInterval);
+        audioCheckInterval = null;
+    }
+});
+
+// === ОБРАБОТЧИКИ ДЛЯ DESKTOP SOURCES ===
 electron_bridge.on_event('desktop-sources-response', (response) => {
     console.log('🔍 [PRELOAD] Sources response received:');
     console.log('  - Source type:', response.sourceType);
@@ -204,22 +338,7 @@ electron_bridge.on_event('desktop-sources-response', (response) => {
     }
 });
 
-// Network error handler
-window.addEventListener("load", () => {
-    if (!location.href.includes("app/renderer/network.html")) {
-        return;
-    }
-    const $reconnectButton = document.querySelector("#reconnect")!;
-    const $settingsButton = document.querySelector("#settings")!;
-    NetworkError.init($reconnectButton, $settingsButton);
-});
-
-ipcRenderer.send("preload-log", "✅ Preload: Initialization complete");
-
-// === 1. Добавить в preload.ts ===
-// Добавьте этот код в конец файла preload.ts
-
-// Обработчик для нативного потока
+// === NATIVE STREAM HANDLING ===
 electron_bridge.on_event("shareNativeStream", async (streamData: any) => {
     ipcRenderer.send("preload-log", "🎯 Preload: shareNativeStream event received");
     
@@ -228,7 +347,7 @@ electron_bridge.on_event("shareNativeStream", async (streamData: any) => {
     ipcRenderer.send("preload-log", "✅ Preload: Stream data sent to Jitsi");
 });
 
-// Expose native stream API
+// === EXPOSE NATIVE STREAM API ===
 contextBridge.exposeInMainWorld('nativeStream', {
     createTestStream: async () => {
         ipcRenderer.send("preload-log", "🎯 Creating test MediaStream");
@@ -317,12 +436,23 @@ contextBridge.exposeInMainWorld('nativeStream', {
     }
 });
 
-// Слушаем команду от main процесса
-ipcRenderer.on("create-native-stream-for-jitsi", () => {
-    ipcRenderer.send("preload-log", "🎯 Preload: Received create-native-stream-for-jitsi");
+// === CREATE NATIVE STREAM FOR JITSI ===
+ipcRenderer.on("create-native-stream-for-jitsi", async () => {
+    ipcRenderer.send("preload-log", "🎯 [NATIVE-STREAM] Received create-native-stream-for-jitsi");
+    ipcRenderer.send("preload-log", `🎯 [NATIVE-STREAM] Platform: ${process.platform}`);
     
-    // Создаем MediaStream в контексте webview
     try {
+        // Проверяем какой модуль используется
+        const moduleInfo = await ipcRenderer.invoke('test-native-audio');
+        ipcRenderer.send("preload-log", `🎯 [NATIVE-STREAM] Module info: ${JSON.stringify(moduleInfo)}`);
+        
+        // Если это Windows и используется mock
+        if (process.platform === 'win32' && moduleInfo.isMock) {
+            ipcRenderer.send("preload-log", "⚠️ [NATIVE-STREAM] WARNING: Using MOCK module on Windows!");
+            ipcRenderer.send("preload-log", "⚠️ [NATIVE-STREAM] No real audio capture available!");
+        }
+        
+        // Создаем MediaStream в контексте webview
         const canvas = document.createElement('canvas');
         canvas.width = 1920;
         canvas.height = 1080;
@@ -404,12 +534,11 @@ ipcRenderer.on("create-native-stream-for-jitsi", () => {
         }, 60000);
         
     } catch (error: any) {
-        ipcRenderer.send("preload-log", `❌ Error creating stream: ${error.message}`);
+        ipcRenderer.send("preload-log", `❌ [NATIVE-STREAM] Error: ${error.message}`);
     }
 });
 
-
-// Обработчик для создания и передачи нативного потока в Jitsi
+// === CREATE AND SHARE NATIVE STREAM ===
 electron_bridge.on_event("create-and-share-native-stream", async () => {
     ipcRenderer.send("preload-log", "🎯 Preload: create-and-share-native-stream received");
     
@@ -483,6 +612,7 @@ electron_bridge.on_event("create-and-share-native-stream", async () => {
     }
 });
 
+// === FORWARD MESSAGE HANDLERS ===
 ['create-native-stream-for-jitsi', 'forward-message'].forEach(channel => {
     ipcRenderer.on(channel, (event, ...args) => {
         ipcRenderer.send("preload-log", `🎯 Preload: Received ${channel}, args: ${JSON.stringify(args)}`);
@@ -565,6 +695,7 @@ function createNativeStreamForJitsi() {
     }
 }
 
+// === JITSI CONFERENCE HANDLING ===
 electron_bridge.on_event("jitsi-conference-started", async (data: {
     roomName: string;
     jwt?: string;
@@ -580,10 +711,28 @@ electron_bridge.on_event("jitsi-conference-started", async (data: {
     
     const result = await ipcRenderer.invoke("create-jitsi-sdk-from-zulip", {
         roomUrl: fullRoomUrl,
-        roomName: data.roomName,      // передаём всегда
+        roomName: data.roomName,
         jwt: data.jwt || "",
-        userInfo: data.userInfo || {} // тоже пробрасываем
+        userInfo: data.userInfo || {}
     });
 
     ipcRenderer.send("preload-log", `🎯 Conference window created: ${result.success}`);
 });
+
+// === NETWORK ERROR HANDLER ===
+window.addEventListener("load", () => {
+    if (!location.href.includes("app/renderer/network.html")) {
+        return;
+    }
+    const $reconnectButton = document.querySelector("#reconnect")!;
+    const $settingsButton = document.querySelector("#settings")!;
+    NetworkError.init($reconnectButton, $settingsButton);
+});
+
+// === ФИНАЛЬНАЯ ПРОВЕРКА ===
+ipcRenderer.send("preload-log", "====================================");
+ipcRenderer.send("preload-log", "PRELOAD INITIALIZATION COMPLETE");
+ipcRenderer.send("preload-log", `Context: ${window.location.hostname}`);
+ipcRenderer.send("preload-log", `Platform: ${process.platform}`);
+ipcRenderer.send("preload-log", `Process type: ${process.type}`);
+ipcRenderer.send("preload-log", "====================================");
