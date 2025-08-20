@@ -31,6 +31,7 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "psapi.lib")
 
+
 // Определение DWMWA_CLOAKED если его нет
 #ifndef DWMWA_CLOAKED
 #define DWMWA_CLOAKED 14
@@ -62,6 +63,10 @@ static napi_threadsafe_function g_audio_tsfn = nullptr;
 static std::atomic<uint64_t> g_video_frame_count{0};
 static std::atomic<uint64_t> g_audio_frame_count{0};
 static std::atomic<bool> g_capture_active{false};
+
+static double g_js_time_offset = 0;
+static bool g_time_synced = false;
+static std::mutex g_time_sync_mutex;
 
 // Структуры для передачи данных
 struct VideoFrameData {
@@ -104,34 +109,73 @@ struct EnumWindowsData {
     std::vector<CaptureSource>* sources;
 };
 
-GetTimestamp() {
-    // БЫЛО: используется std::chrono::high_resolution_clock
-    // ПРОБЛЕМА: не синхронизирован с JavaScript performance.now()
+struct AudioTimestamp {
+    double timestamp;
+    UINT32 frames;
+};
+std::vector<AudioTimestamp> audioTimestamps;
+double baseAudioTimestamp = 0;
+
+
+napi_value SyncTimeBase(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     
-    // СТАЛО: используем QueryPerformanceCounter для Windows
-    #ifdef _WIN32
-        static LARGE_INTEGER frequency;
-        static LARGE_INTEGER startTime;
-        static bool initialized = false;
-        
-        if (!initialized) {
-            QueryPerformanceFrequency(&frequency);
-            QueryPerformanceCounter(&startTime);
-            initialized = true;
+    if (argc < 1) {
+        napi_throw_type_error(env, nullptr, "Expected JS timestamp");
+        return nullptr;
+    }
+    
+    double jsTimestamp;
+    napi_get_value_double(env, argv[0], &jsTimestamp);
+    
+    // Получаем текущее время Windows
+    double winTimestamp = GetTimestamp();
+    
+    // Вычисляем смещение
+    {
+        std::lock_guard<std::mutex> lock(g_time_sync_mutex);
+        g_js_time_offset = jsTimestamp - winTimestamp;
+        g_time_synced = true;
+    }
+    
+    char log[256];
+    sprintf_s(log, "Time sync: JS=%f, Win=%f, Offset=%f\n", 
+              jsTimestamp, winTimestamp, g_js_time_offset);
+    OutputDebugStringA(log);
+    
+    napi_value result;
+    napi_get_boolean(env, true, &result);
+    return result;
+}
+
+GetTimestamp() {
+    static LARGE_INTEGER frequency;
+    static LARGE_INTEGER startTime;
+    static bool initialized = false;
+    
+    if (!initialized) {
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&startTime);
+        initialized = true;
+    }
+    
+    LARGE_INTEGER currentTime;
+    QueryPerformanceCounter(&currentTime);
+    
+    double elapsed = (double)(currentTime.QuadPart - startTime.QuadPart);
+    double timestamp = (elapsed / frequency.QuadPart) * 1000.0;
+    
+    // Применяем смещение для синхронизации с JS
+    {
+        std::lock_guard<std::mutex> lock(g_time_sync_mutex);
+        if (g_time_synced) {
+            timestamp += g_js_time_offset;
         }
-        
-        LARGE_INTEGER currentTime;
-        QueryPerformanceCounter(&currentTime);
-        
-        // Возвращаем в миллисекундах для совместимости с JS
-        double elapsed = (double)(currentTime.QuadPart - startTime.QuadPart);
-        return (elapsed / frequency.QuadPart) * 1000.0;
-    #else
-        // Для других платформ оставляем как было
-        static auto start = std::chrono::high_resolution_clock::now();
-        auto now = std::chrono::high_resolution_clock::now();
-        return std::chrono::duration<double, std::milli>(now - start).count();
-    #endif
+    }
+    
+    return timestamp;
 }
 
 // Класс для захвата экрана через DXGI
@@ -609,12 +653,26 @@ public:
         
         // === КРИТИЧНОЕ ИЗМЕНЕНИЕ №2: Добавляем временную метку ===
         double currentTimestamp = GetTimestamp(); // Используем новый GetTimestamp
+
+        // Добавляем компенсацию задержки WASAPI (обычно ~10-20ms)
+        const double WASAPI_LATENCY_MS = 10.0;
+        currentTimestamp -= WASAPI_LATENCY_MS;
         
         // Накапливаем в буфер
         {
             std::lock_guard<std::mutex> lock(bufferMutex);
+        
+            // Сохраняем метку времени для первого семпла
+            if (audioTimestamps.empty() || accumulationBuffer.empty()) {
+                baseAudioTimestamp = currentTimestamp;
+            }
+            
             accumulationBuffer.insert(accumulationBuffer.end(), 
                                     samples.begin(), samples.end());
+            
+            // Вычисляем точную метку для каждого фрейма
+            double frameDuration = (1000.0 * numFrames) / waveFormat->nSamplesPerSec;
+            audioTimestamps.push_back({currentTimestamp, numFrames});
         }
         
         // === КРИТИЧНОЕ ИЗМЕНЕНИЕ №3: Передаем timestamp в SendBufferedFrames ===

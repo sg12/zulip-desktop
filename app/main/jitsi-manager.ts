@@ -275,6 +275,13 @@ export class JitsiManager {
     private debugMonitoringStarted: boolean = false;
     private debugMonitoringInterval?: NodeJS.Timer;
 
+    // Добавьте отслеживание последней метки видео:
+    private lastVideoTimestamp: number = 0;
+
+    private getLastVideoTimestamp(): number {
+        return this.lastVideoTimestamp;
+    }
+
     constructor(
         nativeCapture: NativeCaptureManager,
         bundlePath: string,
@@ -1954,55 +1961,127 @@ export class JitsiManager {
                         
                         const videoTrack = videoStream.getVideoTracks()[0];
                         
-                        // 2. Создаем AUDIO контекст
+                        // Сохраняем начальное время для синхронизации
+                        window.streamStartTime = performance.now();
+                        window.lastVideoFrameTime = window.streamStartTime;
+                        
+                        // 2. Создаем AUDIO контекст с оптимальными настройками
                         const audioContext = new AudioContext({ 
-                            sampleRate: 48000, 
-                            latencyHint: 'interactive' 
+                            sampleRate: 48000,
+                            latencyHint: isWindows ? 'playback' : 'interactive'
                         });
                         
-                        const scriptProcessor = audioContext.createScriptProcessor(2048, 0, 2);
+                        // Для Windows используем больший буфер для стабильности
+                        const bufferSize = isWindows ? 4096 : 2048;
+                        const scriptProcessor = audioContext.createScriptProcessor(bufferSize, 0, 2);
                         
                         // 3. Создаем буферы - разные для разных платформ
                         if (isWindows) {
-                            // Windows-специфичный буфер с синхронизацией
-                            class WindowsSyncRingBuffer {
+                            // Windows-специфичный буфер с улучшенной синхронизацией
+                            class WindowsAdaptiveBuffer {
                                 constructor(size) {
                                     this.leftBuffer = new Float32Array(size);
                                     this.rightBuffer = new Float32Array(size);
-                                    this.timestamps = new Float32Array(size);
                                     this.writeIndex = 0;
                                     this.readIndex = 0;
                                     this.availableSamples = 0;
                                     this.size = size;
+                                    
+                                    // Параметры адаптивной буферизации
+                                    this.targetLatency = 2048; // ~42ms при 48kHz
+                                    this.minLatency = 960;     // ~20ms
+                                    this.maxLatency = 4800;    // ~100ms
+                                    
+                                    // Для сглаживания
+                                    this.lastSampleLeft = 0;
+                                    this.lastSampleRight = 0;
+                                    
+                                    // Статистика
+                                    this.underruns = 0;
+                                    this.overruns = 0;
                                 }
                                 
                                 writeWithTimestamp(leftData, rightData, timestamp) {
+                                    // Проверяем переполнение
+                                    if (this.availableSamples > this.maxLatency) {
+                                        this.overruns++;
+                                        // Пропускаем старые данные
+                                        const toSkip = this.availableSamples - this.targetLatency;
+                                        this.readIndex = (this.readIndex + toSkip) % this.size;
+                                        this.availableSamples = this.targetLatency;
+                                        
+                                        if (this.overruns % 10 === 0) {
+                                            console.warn('[AUDIO] Buffer overrun, adjusting...', this.overruns);
+                                        }
+                                    }
+                                    
+                                    // Записываем данные
                                     for (let i = 0; i < leftData.length; i++) {
                                         this.leftBuffer[this.writeIndex] = leftData[i];
                                         this.rightBuffer[this.writeIndex] = rightData[i];
-                                        this.timestamps[this.writeIndex] = timestamp + (i / 48000 * 1000);
                                         this.writeIndex = (this.writeIndex + 1) % this.size;
                                         this.availableSamples = Math.min(this.availableSamples + 1, this.size);
                                     }
                                 }
                                 
                                 read(leftOutput, rightOutput) {
-                                    const samplesToRead = Math.min(leftOutput.length, this.availableSamples);
+                                    const requestedSamples = leftOutput.length;
+                                    
+                                    // Проверяем наличие данных
+                                    if (this.availableSamples < this.minLatency) {
+                                        this.underruns++;
+                                        
+                                        // Заполняем тишиной с плавным затуханием
+                                        for (let i = 0; i < requestedSamples; i++) {
+                                            const fade = Math.exp(-i / requestedSamples * 3);
+                                            leftOutput[i] = this.lastSampleLeft * fade;
+                                            rightOutput[i] = this.lastSampleRight * fade;
+                                        }
+                                        
+                                        if (this.underruns % 10 === 0) {
+                                            console.warn('[AUDIO] Buffer underrun:', this.underruns);
+                                        }
+                                        return 0;
+                                    }
+                                    
+                                    // Читаем доступные данные
+                                    const samplesToRead = Math.min(requestedSamples, this.availableSamples);
+                                    
                                     for (let i = 0; i < samplesToRead; i++) {
-                                        leftOutput[i] = this.leftBuffer[this.readIndex];
-                                        rightOutput[i] = this.rightBuffer[this.readIndex];
+                                        // Простое сглаживание для уменьшения щелчков
+                                        const smoothFactor = 0.95;
+                                        const rawLeft = this.leftBuffer[this.readIndex];
+                                        const rawRight = this.rightBuffer[this.readIndex];
+                                        
+                                        leftOutput[i] = rawLeft * smoothFactor + this.lastSampleLeft * (1 - smoothFactor);
+                                        rightOutput[i] = rawRight * smoothFactor + this.lastSampleRight * (1 - smoothFactor);
+                                        
+                                        this.lastSampleLeft = leftOutput[i];
+                                        this.lastSampleRight = rightOutput[i];
+                                        
                                         this.readIndex = (this.readIndex + 1) % this.size;
                                     }
-                                    for (let i = samplesToRead; i < leftOutput.length; i++) {
+                                    
+                                    // Заполняем оставшееся тишиной если нужно
+                                    for (let i = samplesToRead; i < requestedSamples; i++) {
                                         leftOutput[i] = 0;
                                         rightOutput[i] = 0;
                                     }
+                                    
                                     this.availableSamples = Math.max(0, this.availableSamples - samplesToRead);
+                                    
+                                    // Периодический лог статистики
+                                    if (window.audioCounter && window.audioCounter % 100 === 0) {
+                                        console.log('[AUDIO] Buffer:', this.availableSamples, 
+                                                'samples, Under/Over:', this.underruns + '/' + this.overruns);
+                                    }
+                                    
                                     return samplesToRead;
                                 }
                             }
                             
-                            window.windowsRingBuffer = new WindowsSyncRingBuffer(48000);
+                            // Создаем адаптивный буфер для Windows
+                            window.windowsRingBuffer = new WindowsAdaptiveBuffer(96000);
                             
                             scriptProcessor.onaudioprocess = (event) => {
                                 if (!window.isNativeActive) {
@@ -2010,10 +2089,21 @@ export class JitsiManager {
                                     event.outputBuffer.getChannelData(1).fill(0);
                                     return;
                                 }
+                                
                                 window.windowsRingBuffer.read(
                                     event.outputBuffer.getChannelData(0),
                                     event.outputBuffer.getChannelData(1)
                                 );
+                                
+                                // Применяем лимитер для защиты от клиппинга
+                                const leftChannel = event.outputBuffer.getChannelData(0);
+                                const rightChannel = event.outputBuffer.getChannelData(1);
+                                
+                                for (let i = 0; i < leftChannel.length; i++) {
+                                    // Hard limit at 0.99 to prevent clipping
+                                    leftChannel[i] = Math.max(-0.99, Math.min(0.99, leftChannel[i]));
+                                    rightChannel[i] = Math.max(-0.99, Math.min(0.99, rightChannel[i]));
+                                }
                             };
                             
                         } else {
@@ -2081,18 +2171,21 @@ export class JitsiManager {
                         window.isNativeActive = true;
                         window.isHybridMode = true;
                         window.audioCounter = 0;
-                        window.platformMode = isWindows ? 'windows-sync' : 'macos-standard';
+                        window.platformMode = isWindows ? 'windows-adaptive' : 'macos-standard';
                         
                         if (audioContext.state === 'suspended') {
                             await audioContext.resume();
                         }
                         
-                        console.log('[STREAM-ELECTRON] ✅ Hybrid stream ready! Mode:', window.platformMode);
+                        console.log('[STREAM-ELECTRON] ✅ Hybrid stream ready!');
+                        console.log('[STREAM-ELECTRON] Mode:', window.platformMode);
+                        console.log('[STREAM-ELECTRON] Buffer size:', bufferSize);
                         
                         return {
                             success: true,
                             streamId: hybridStream.id,
-                            mode: window.platformMode
+                            mode: window.platformMode,
+                            audioBufferSize: bufferSize
                         };
                         
                     } catch (error) {
@@ -2103,16 +2196,12 @@ export class JitsiManager {
             `);
             
             if (result.success) {
-                if (result.success) {
-                    this.activeMediaStreams.clear();
-                    this.activeMediaStreams.add(result.streamId);
-                    if (result.videoStreamId) {
-                        this.activeMediaStreams.add(result.videoStreamId);
-                    }
-                }
+                this.activeMediaStreams.clear();
+                this.activeMediaStreams.add(result.streamId);
+                
                 log.info(`[STREAM-ELECTRON] <<< createHybridStreamInJitsi SUCCESS`);
-                log.info(`[STREAM-ELECTRON] Quality preset: ${result.qualityPreset}`);
-                log.info(`[STREAM-ELECTRON] Actual quality: ${result.videoQuality}`);
+                log.info(`[STREAM-ELECTRON] Mode: ${result.mode}`);
+                log.info(`[STREAM-ELECTRON] Audio buffer: ${result.audioBufferSize}`);
             } else {
                 log.error(`[STREAM-ELECTRON] <<< createHybridStreamInJitsi FAILED: ${result.error}`);
             }
@@ -2162,6 +2251,7 @@ export class JitsiManager {
             // Video callback - игнорируем
             (videoData: any) => {
                 this.state.videoFrameCount++;
+                this.lastVideoTimestamp = performance.now();
                 if (this.state.videoFrameCount === 1) {
                     log.info("[STREAM-ELECTRON] Ignoring native video (using Electron)");
                 }
@@ -2229,19 +2319,30 @@ export class JitsiManager {
             const arrayBuffer = audioData.data;
             const samples = audioData.numSamples || 960;
             const channels = audioData.channels || 2;
-            const syncTimestamp = audioData.syncTimestamp;
+            const timestamp = audioData.timestamp;
             
             const { leftChannel, rightChannel } = this.decodeAudioData(arrayBuffer, samples, channels);
             
+            // Применяем адаптивную буферизацию
+            const currentVideoTime = this.getLastVideoTimestamp();
+            const audioDrift = timestamp - currentVideoTime;
+            
+            // Корректируем если дрифт слишком большой
+            let adjustedTimestamp = timestamp;
+            if (Math.abs(audioDrift) > 50) { // 50ms порог
+                log.warn(`[WINDOWS-AUDIO] Large drift detected: ${audioDrift}ms`);
+                adjustedTimestamp = currentVideoTime + 20; // Целевая задержка 20ms
+            }
+
             // Windows-специфичная нормализация с учетом тайминга
             const { processedLeft, processedRight } = this.normalizeAudioWithTiming(
                 leftChannel, 
                 rightChannel,
-                syncTimestamp
+                adjustedTimestamp
             );
             
             // Отправляем с синхронизацией
-            this.sendAudioToJitsiWithSync(processedLeft, processedRight, samples, syncTimestamp);
+            this.sendAudioToJitsiWithSync(processedLeft, processedRight, samples, adjustedTimestamp);
             
         } catch (error: any) {
             log.error(`[WINDOWS-AUDIO] Error: ${error.message}`);
