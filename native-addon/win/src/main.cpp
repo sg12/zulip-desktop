@@ -117,6 +117,35 @@ std::vector<AudioTimestamp> audioTimestamps;
 double baseAudioTimestamp = 0;
 
 
+double GetTimestamp() {
+    static LARGE_INTEGER frequency;
+    static LARGE_INTEGER startTime;
+    static bool initialized = false;
+    
+    if (!initialized) {
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&startTime);
+        initialized = true;
+    }
+    
+    LARGE_INTEGER currentTime;
+    QueryPerformanceCounter(&currentTime);
+    
+    double elapsed = (double)(currentTime.QuadPart - startTime.QuadPart);
+    double timestamp = (elapsed / frequency.QuadPart) * 1000.0;
+    
+    // Применяем смещение для синхронизации с JS
+    {
+        std::lock_guard<std::mutex> lock(g_time_sync_mutex);
+        if (g_time_synced) {
+            timestamp += g_js_time_offset;
+        }
+    }
+    
+    return timestamp;
+}
+
+// Затем функция SyncTimeBase (она использует GetTimestamp, поэтому должна быть после)
 napi_value SyncTimeBase(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
@@ -148,34 +177,6 @@ napi_value SyncTimeBase(napi_env env, napi_callback_info info) {
     napi_value result;
     napi_get_boolean(env, true, &result);
     return result;
-}
-
-GetTimestamp() {
-    static LARGE_INTEGER frequency;
-    static LARGE_INTEGER startTime;
-    static bool initialized = false;
-    
-    if (!initialized) {
-        QueryPerformanceFrequency(&frequency);
-        QueryPerformanceCounter(&startTime);
-        initialized = true;
-    }
-    
-    LARGE_INTEGER currentTime;
-    QueryPerformanceCounter(&currentTime);
-    
-    double elapsed = (double)(currentTime.QuadPart - startTime.QuadPart);
-    double timestamp = (elapsed / frequency.QuadPart) * 1000.0;
-    
-    // Применяем смещение для синхронизации с JS
-    {
-        std::lock_guard<std::mutex> lock(g_time_sync_mutex);
-        if (g_time_synced) {
-            timestamp += g_js_time_offset;
-        }
-    }
-    
-    return timestamp;
 }
 
 // Класс для захвата экрана через DXGI
@@ -506,22 +507,18 @@ public:
         // Логируем формат
         char log[256];
         sprintf_s(log, "WASAPI Format: Tag=0x%X, Bits=%d, Channels=%d, Rate=%d Hz\n",
-                 waveFormat->wFormatTag, waveFormat->wBitsPerSample,
-                 waveFormat->nChannels, waveFormat->nSamplesPerSec);
+                waveFormat->wFormatTag, waveFormat->wBitsPerSample,
+                waveFormat->nChannels, waveFormat->nSamplesPerSec);
         OutputDebugStringA(log);
         
         // Инициализируем с оптимальным буфером
+        // ИСПРАВЛЕНО: убрана дублированная переменная streamFlags
+        REFERENCE_TIME hnsRequestedDuration = 100000; // 10ms
         DWORD streamFlags = isSystemAudio ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
         
-        // Используем 20ms буфер для баланса между латентностью и стабильностью
-        REFERENCE_TIME hnsRequestedDuration = 100000; // 10ms
-
-        DWORD streamFlags = isSystemAudio ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
-
         #ifdef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
             streamFlags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
         #endif
-
         
         hr = audioClient->Initialize(
             AUDCLNT_SHAREMODE_SHARED,
@@ -1384,7 +1381,8 @@ napi_value Init(napi_env env, napi_value exports) {
         {"setCaptureQuality", nullptr, SetCaptureQuality, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCaptureSource", nullptr, SetCaptureSource, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setWebRTCVideoCallback", nullptr, SetWebRTCVideoCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"setWebRTCAudioCallback", nullptr, SetWebRTCAudioCallback, nullptr, nullptr, nullptr, napi_default, nullptr}
+        {"setWebRTCAudioCallback", nullptr, SetWebRTCAudioCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"syncTimeBase", nullptr, SyncTimeBase, nullptr, nullptr, nullptr, napi_default, nullptr}  // Добавлено
     };
     
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
