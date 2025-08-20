@@ -104,7 +104,11 @@ struct EnumWindowsData {
     std::vector<CaptureSource>* sources;
 };
 
-double GetTimestamp() {
+GetTimestamp() {
+    // БЫЛО: используется std::chrono::high_resolution_clock
+    // ПРОБЛЕМА: не синхронизирован с JavaScript performance.now()
+    
+    // СТАЛО: используем QueryPerformanceCounter для Windows
     #ifdef _WIN32
         static LARGE_INTEGER frequency;
         static LARGE_INTEGER startTime;
@@ -119,11 +123,11 @@ double GetTimestamp() {
         LARGE_INTEGER currentTime;
         QueryPerformanceCounter(&currentTime);
         
-        // Возвращаем время в секундах с начала захвата
+        // Возвращаем в миллисекундах для совместимости с JS
         double elapsed = (double)(currentTime.QuadPart - startTime.QuadPart);
-        return (elapsed / frequency.QuadPart) * 1000.0; // В миллисекундах
+        return (elapsed / frequency.QuadPart) * 1000.0;
     #else
-        // Для других платформ
+        // Для других платформ оставляем как было
         static auto start = std::chrono::high_resolution_clock::now();
         auto now = std::chrono::high_resolution_clock::now();
         return std::chrono::duration<double, std::milli>(now - start).count();
@@ -395,12 +399,10 @@ private:
     std::thread captureThread;
     bool isSystemAudio = true;
     
-    // Добавляем буфер для накопления сэмплов
+    // Добавляем буфер для накопления семплов
     std::vector<float> accumulationBuffer;
     std::mutex bufferMutex;
-    
-    // ИСПРАВЛЕНИЕ: TARGET_FRAME_SIZE теперь член класса, не глобальная переменная
-    static constexpr int TARGET_FRAME_SIZE = 240; // Уменьшено с 480 до 240 для меньшей латентности
+    const int TARGET_FRAME_SIZE = 240; // 5ms при 48kHz для меньшей латентности
     
 public:
     bool Initialize(const std::string& sourceType, const std::string& sourceId) {
@@ -464,20 +466,22 @@ public:
                  waveFormat->nChannels, waveFormat->nSamplesPerSec);
         OutputDebugStringA(log);
         
-        // ИСПРАВЛЕНИЕ: Одно объявление streamFlags
+        // Инициализируем с оптимальным буфером
         DWORD streamFlags = isSystemAudio ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
         
-        // Добавляем флаги для Windows 10+ если доступны
+        // Используем 20ms буфер для баланса между латентностью и стабильностью
+        REFERENCE_TIME hnsRequestedDuration = 100000; // 10ms
+
+        DWORD streamFlags = isSystemAudio ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
+
         #ifdef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
             streamFlags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
         #endif
-        
-        // Используем уменьшенный буфер для меньшей латентности
-        REFERENCE_TIME hnsRequestedDuration = 100000; // 10ms вместо 20ms
+
         
         hr = audioClient->Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            streamFlags,  // Используем уже объявленную переменную
+            streamFlags,
             hnsRequestedDuration,
             0,
             waveFormat,
@@ -529,8 +533,11 @@ public:
     }
     
     void CaptureLoop() {
-        // Устанавливаем высокий приоритет потока для минимальной латентности
+        // === КРИТИЧНОЕ ИЗМЕНЕНИЕ: Более высокий приоритет ===
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        
+        // === КРИТИЧНОЕ ИЗМЕНЕНИЕ: Привязка к конкретному ядру CPU ===
+        SetThreadAffinityMask(GetCurrentThread(), 1 << 2); // Ядро 2
         
         while (isCapturing) {
             UINT32 packetLength = 0;
@@ -540,28 +547,29 @@ public:
                 BYTE* data = nullptr;
                 UINT32 numFramesAvailable;
                 DWORD flags;
+                UINT64 position;
+                UINT64 qpcPosition; // === НОВОЕ: QPC позиция для точного тайминга
                 
                 hr = captureClient->GetBuffer(
                     &data,
                     &numFramesAvailable,
                     &flags,
-                    nullptr,
-                    nullptr
+                    &position,      // Используем позицию
+                    &qpcPosition    // Используем QPC позицию
                 );
                 
                 if (SUCCEEDED(hr)) {
                     if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT) && numFramesAvailable > 0) {
                         ProcessAudioData(data, numFramesAvailable);
                     } else if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                        // Отправляем тишину для поддержания потока
                         ProcessSilence(numFramesAvailable);
                     }
                     
                     captureClient->ReleaseBuffer(numFramesAvailable);
                 }
             } else {
-                // Короткий sleep для экономии CPU (уменьшено с 5ms до 2ms)
-                Sleep(2);
+                // === КРИТИЧНОЕ ИЗМЕНЕНИЕ: Более короткий sleep ===
+                Sleep(2); // Было 5ms, стало 2ms
             }
         }
     }
@@ -570,7 +578,7 @@ public:
         size_t sampleCount = numFrames * waveFormat->nChannels;
         std::vector<float> samples(sampleCount);
         
-        // Правильная конвертация в float в зависимости от формата
+        // === КРИТИЧНОЕ ИЗМЕНЕНИЕ №1: Правильная конвертация для Windows ===
         if (waveFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
             // Для EXTENSIBLE проверяем SubFormat
             WAVEFORMATEXTENSIBLE* pWaveFormatExt = (WAVEFORMATEXTENSIBLE*)waveFormat;
@@ -579,71 +587,39 @@ public:
                 // Float формат
                 float* srcFloat = (float*)data;
                 for (size_t i = 0; i < sampleCount; i++) {
-                    float sample = srcFloat[i];
-                    // Защита от NaN и Inf
-                    if (!isfinite(sample)) {
-                        sample = 0.0f;
-                    } else {
-                        sample = std::clamp(sample, -1.0f, 1.0f);
-                    }
-                    samples[i] = sample;
+                    samples[i] = srcFloat[i];
+                    // КРИТИЧНО: клампинг для защиты от искажений
+                    if (!isfinite(samples[i])) samples[i] = 0.0f;
+                    else if (samples[i] > 1.0f) samples[i] = 1.0f;
+                    else if (samples[i] < -1.0f) samples[i] = -1.0f;
                 }
             } else if (IsEqualGUID(pWaveFormatExt->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)) {
-                // PCM в EXTENSIBLE контейнере
-                ConvertPCMToFloat(data, samples.data(), sampleCount);
+                // PCM в EXTENSIBLE
+                ConvertPCMToFloat(data, samples.data(), sampleCount, waveFormat->wBitsPerSample);
             }
-        } else if (waveFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT || 
-                   waveFormat->wBitsPerSample == 32) {
-            // Обычный float формат
+        } else if (waveFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+            // Обычный float
             float* srcFloat = (float*)data;
             for (size_t i = 0; i < sampleCount; i++) {
                 samples[i] = std::clamp(srcFloat[i], -1.0f, 1.0f);
             }
         } else if (waveFormat->wFormatTag == WAVE_FORMAT_PCM) {
-            // PCM формат
-            ConvertPCMToFloat(data, samples.data(), sampleCount);
-        } else {
-            // Неизвестный формат - заполняем тишиной
-            std::fill(samples.begin(), samples.end(), 0.0f);
+            ConvertPCMToFloat(data, samples.data(), sampleCount, waveFormat->wBitsPerSample);
         }
+        
+        // === КРИТИЧНОЕ ИЗМЕНЕНИЕ №2: Добавляем временную метку ===
+        double currentTimestamp = GetTimestamp(); // Используем новый GetTimestamp
         
         // Накапливаем в буфер
         {
             std::lock_guard<std::mutex> lock(bufferMutex);
             accumulationBuffer.insert(accumulationBuffer.end(), 
-                                     samples.begin(), samples.end());
+                                    samples.begin(), samples.end());
         }
         
-        // Отправляем пакетами фиксированного размера
-        SendBufferedFrames();
+        // === КРИТИЧНОЕ ИЗМЕНЕНИЕ №3: Передаем timestamp в SendBufferedFrames ===
+        SendBufferedFrames(currentTimestamp);
     }
-
-    void ConvertPCMToFloat(BYTE* pcmData, float* output, size_t sampleCount) {
-        if (waveFormat->wBitsPerSample == 16) {
-            INT16* src = (INT16*)pcmData;
-            for (size_t i = 0; i < sampleCount; i++) {
-                output[i] = src[i] / 32768.0f;
-            }
-        } else if (waveFormat->wBitsPerSample == 24) {
-            for (size_t i = 0; i < sampleCount; i++) {
-                BYTE* samplePtr = pcmData + (i * 3);
-                INT32 sample = (samplePtr[0] | (samplePtr[1] << 8) | (samplePtr[2] << 16));
-                if (sample & 0x800000) sample |= 0xFF000000; // Sign extend
-                output[i] = sample / 8388608.0f;
-            }
-        } else if (waveFormat->wBitsPerSample == 32) {
-            INT32* src = (INT32*)pcmData;
-            for (size_t i = 0; i < sampleCount; i++) {
-                output[i] = src[i] / 2147483648.0f;
-            }
-        } else {
-            // Неподдерживаемый формат - заполняем тишиной
-            for (size_t i = 0; i < sampleCount; i++) {
-                output[i] = 0.0f;
-            }
-        }
-    }
-
 
     void ConvertPCMToFloat(BYTE* pcmData, float* output, size_t sampleCount, WORD bitsPerSample) {
         if (bitsPerSample == 16) {
