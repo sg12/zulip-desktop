@@ -19,6 +19,8 @@
 #include <mutex>
 #include <cstring>
 #include <cmath>
+#include <set>
+#include <map>
 
 #include <ks.h>
 #include <ksmedia.h>
@@ -93,9 +95,9 @@ struct CaptureSource {
 
 // Глобальные параметры качества
 struct QualitySettings {
-    int width = 1;
-    int height = 1;
-    int fps = 1;
+    int width = 1920;
+    int height = 1080;
+    int fps = 30;
     std::mutex mutex;
 } g_quality;
 
@@ -238,9 +240,9 @@ public:
     }
     
     void SetQuality(int width, int height, int fps) {
-        targetWidth = 1;
-        targetHeight = 1;
-        targetFps = 1;
+        targetWidth = width;
+        targetHeight = height;
+        targetFps = fps;
     }
     
     void StartCapture() {
@@ -388,11 +390,29 @@ public:
     }
 };
 
-// === НОВЫЙ КЛАСС для захвата звука от конкретного приложения ===
+// УЛУЧШЕННЫЙ КЛАСС для захвата звука с фильтрацией конференций
+// УЛУЧШЕННЫЙ КЛАСС для захвата звука с умной фильтрацией
 class ApplicationAudioCapture {
 private:
-    DWORD targetProcessId = 0;
+    // Структура для хранения информации о сессии
+    struct AudioSessionInfo {
+        DWORD processId;
+        std::wstring processName;
+        bool shouldCapture;
+        float currentVolume;
+        IAudioSessionControl* control;
+    };
+    
+    // Списки для фильтрации
+    std::set<DWORD> excludedProcessIds;
+    std::set<std::wstring> excludedProcessNames;
+    std::map<DWORD, AudioSessionInfo> activeSessions;
+    std::mutex sessionsMutex;
+    
+    DWORD currentElectronPid;
+    DWORD targetProcessId = 0;  // ID процесса захватываемого окна
     std::wstring applicationName;
+    
     IMMDeviceEnumerator* deviceEnumerator = nullptr;
     IMMDevice* device = nullptr;
     IAudioClient* audioClient = nullptr;
@@ -402,33 +422,263 @@ private:
     
     std::atomic<bool> isCapturing{false};
     std::thread captureThread;
+    std::thread monitorThread;
     std::vector<float> accumulationBuffer;
     std::mutex bufferMutex;
     const int TARGET_FRAME_SIZE = 960;
     
-    std::atomic<float> targetProcessVolume{0.0f};
-    std::atomic<bool> isTargetProcessActive{false};
-    
     LARGE_INTEGER performanceFrequency;
     LARGE_INTEGER captureStartTime;
-
-    bool enableTestSignal = false;
-    float testSignalFrequency = 440.0f; // Частота ноты Ля
-    float testSignalAmplitude = 0.3f;
-    size_t testSignalPhase = 0;
     
-    // Режим диагностики
-    bool diagnosticMode = false; // ВКЛЮЧАЕМ для теста
-    int diagnosticFrameCount = 0;
+    // Флаги режима работы
+    std::atomic<bool> filterConferenceAudio{true};
+    std::atomic<bool> isWindowCapture{false};  // true если захватываем конкретное окно
+
+    void InitializeExclusions() {
+        // Текущий процесс Electron
+        currentElectronPid = GetCurrentProcessId();
+        excludedProcessIds.insert(currentElectronPid);
+        
+        // Список процессов конференций для исключения
+        // НЕ добавляем браузеры по умолчанию - они могут быть источником контента
+        excludedProcessNames.insert(L"teams.exe");
+        excludedProcessNames.insert(L"zoom.exe");
+        excludedProcessNames.insert(L"zoomvideomeetings.exe");
+        excludedProcessNames.insert(L"skype.exe");
+        excludedProcessNames.insert(L"discord.exe");
+        excludedProcessNames.insert(L"slack.exe");
+        excludedProcessNames.insert(L"webex.exe");
+        excludedProcessNames.insert(L"gotomeeting.exe");
+        
+        OutputDebugStringA("Audio exclusions initialized (smart mode)\n");
+    }
+
+    bool ShouldCaptureFromProcess(DWORD processId) {
+        // ВАЖНО: Если захватываем конкретное окно - всегда берем его звук
+        if (isWindowCapture && processId == targetProcessId) {
+            char log[256];
+            sprintf_s(log, "Capturing audio from target window process: %lu\n", processId);
+            OutputDebugStringA(log);
+            return true;  // Всегда захватываем звук целевого окна
+        }
+        
+        // Если фильтрация отключена, захватываем все
+        if (!filterConferenceAudio) {
+            return true;
+        }
+        
+        // Проверяем по ID процесса - исключаем текущий Electron
+        if (processId == currentElectronPid) {
+            OutputDebugStringA("Excluding current Electron process\n");
+            return false;
+        }
+        
+        // Дополнительные исключенные процессы
+        if (excludedProcessIds.count(processId) > 0) {
+            char log[256];
+            sprintf_s(log, "Excluding process by ID: %lu\n", processId);
+            OutputDebugStringA(log);
+            return false;
+        }
+        
+        // Получаем имя процесса
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+        if (!hProcess) {
+            return true; // Если не можем проверить, разрешаем
+        }
+        
+        wchar_t exePath[MAX_PATH];
+        DWORD pathLen = MAX_PATH;
+        bool shouldCapture = true;
+        
+        if (QueryFullProcessImageNameW(hProcess, 0, exePath, &pathLen)) {
+            std::wstring fullPath(exePath);
+            
+            // Извлекаем имя файла
+            size_t lastSlash = fullPath.find_last_of(L"\\/");
+            std::wstring fileName = (lastSlash != std::wstring::npos) 
+                ? fullPath.substr(lastSlash + 1) 
+                : fullPath;
+            
+            // Приводим к нижнему регистру для сравнения
+            std::transform(fileName.begin(), fileName.end(), fileName.begin(), ::tolower);
+            
+            // Специальная логика для браузеров
+            if (fileName == L"chrome.exe" || fileName == L"msedge.exe" || 
+                fileName == L"firefox.exe" || fileName == L"opera.exe") {
+                
+                // Для системного захвата - проверяем, не Jitsi ли это
+                if (!isWindowCapture) {
+                    // Пытаемся определить по заголовкам окон
+                    bool isConferenceTab = CheckIfBrowserHasConferenceTab(processId);
+                    if (isConferenceTab) {
+                        OutputDebugStringA("Detected conference tab in browser - excluding\n");
+                        shouldCapture = false;
+                    } else {
+                        // Обычный браузер - захватываем
+                        shouldCapture = true;
+                    }
+                } else {
+                    // При захвате окна - всегда берем звук браузера
+                    shouldCapture = true;
+                }
+            } else {
+                // Проверяем по списку исключений для не-браузеров
+                for (const auto& excluded : excludedProcessNames) {
+                    std::wstring excludedLower = excluded;
+                    std::transform(excludedLower.begin(), excludedLower.end(), 
+                                 excludedLower.begin(), ::tolower);
+                    
+                    if (fileName == excludedLower || 
+                        fileName.find(excludedLower) != std::wstring::npos) {
+                        char log[512];
+                        char fileNameChar[256] = {0};
+                        wcstombs(fileNameChar, fileName.c_str(), sizeof(fileNameChar) - 1);
+                        sprintf_s(log, "Excluding conference app: %s (PID: %lu)\n", 
+                                fileNameChar, processId);
+                        OutputDebugStringA(log);
+                        shouldCapture = false;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        CloseHandle(hProcess);
+        return shouldCapture;
+    }
+    
+    bool CheckIfBrowserHasConferenceTab(DWORD processId) {
+        // Эвристика для определения конференц-вкладок в браузере
+        // Проверяем заголовки окон процесса
+        bool hasConference = false;
+        
+        EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+            DWORD pid;
+            GetWindowThreadProcessId(hwnd, &pid);
+            
+            auto* data = reinterpret_cast<std::pair<DWORD, bool*>*>(lParam);
+            if (pid == data->first) {
+                char title[256];
+                GetWindowTextA(hwnd, title, sizeof(title));
+                std::string windowTitle(title);
+                std::transform(windowTitle.begin(), windowTitle.end(), 
+                             windowTitle.begin(), ::tolower);
+                
+                // Проверяем типичные признаки конференций
+                if (windowTitle.find("meet") != std::string::npos ||
+                    windowTitle.find("zoom") != std::string::npos ||
+                    windowTitle.find("teams") != std::string::npos ||
+                    windowTitle.find("jitsi") != std::string::npos ||
+                    windowTitle.find("webex") != std::string::npos ||
+                    windowTitle.find("conference") != std::string::npos ||
+                    windowTitle.find("call") != std::string::npos) {
+                    *(data->second) = true;
+                    return FALSE; // Прекращаем перечисление
+                }
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&std::make_pair(processId, &hasConference)));
+        
+        return hasConference;
+    }
+    
+    void UpdateAudioSessions() {
+        if (!sessionManager) return;
+        
+        std::lock_guard<std::mutex> lock(sessionsMutex);
+        
+        // Очищаем старые сессии
+        for (auto& pair : activeSessions) {
+            if (pair.second.control) {
+                pair.second.control->Release();
+            }
+        }
+        activeSessions.clear();
+        
+        IAudioSessionEnumerator* sessionEnumerator = nullptr;
+        HRESULT hr = sessionManager->GetSessionEnumerator(&sessionEnumerator);
+        if (FAILED(hr)) return;
+        
+        int sessionCount = 0;
+        sessionEnumerator->GetCount(&sessionCount);
+        
+        for (int i = 0; i < sessionCount; i++) {
+            IAudioSessionControl* sessionControl = nullptr;
+            hr = sessionEnumerator->GetSession(i, &sessionControl);
+            if (FAILED(hr)) continue;
+            
+            IAudioSessionControl2* sessionControl2 = nullptr;
+            hr = sessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&sessionControl2);
+            
+            if (SUCCEEDED(hr)) {
+                DWORD processId = 0;
+                hr = sessionControl2->GetProcessId(&processId);
+                
+                if (SUCCEEDED(hr) && processId != 0) {
+                    AudioSessionInfo info;
+                    info.processId = processId;
+                    info.shouldCapture = ShouldCaptureFromProcess(processId);
+                    info.control = sessionControl;
+                    info.currentVolume = 0.0f;
+                    
+                    // Получаем состояние сессии
+                    AudioSessionState state;
+                    hr = sessionControl->GetState(&state);
+                    
+                    if (SUCCEEDED(hr) && state == AudioSessionStateActive) {
+                        // Получаем уровень громкости
+                        IAudioMeterInformation* meterInfo = nullptr;
+                        hr = sessionControl->QueryInterface(__uuidof(IAudioMeterInformation), 
+                                                           (void**)&meterInfo);
+                        if (SUCCEEDED(hr)) {
+                            float peakValue = 0.0f;
+                            meterInfo->GetPeakValue(&peakValue);
+                            info.currentVolume = peakValue;
+                            meterInfo->Release();
+                        }
+                    }
+                    
+                    activeSessions[processId] = info;
+                    sessionControl->AddRef(); // Увеличиваем счетчик ссылок
+                }
+                
+                sessionControl2->Release();
+            } else {
+                sessionControl->Release();
+            }
+        }
+        
+        sessionEnumerator->Release();
+        
+        // Логирование активных сессий
+        static int logCounter = 0;
+        if (++logCounter % 50 == 0) { // Логируем каждые 50 обновлений
+            char log[512];
+            sprintf_s(log, "Audio sessions: Total=%zu, Filtered=%d, Mode=%s, Target=%lu\n", 
+                    activeSessions.size(),
+                    std::count_if(activeSessions.begin(), activeSessions.end(),
+                                [](const auto& pair) { return !pair.second.shouldCapture; }),
+                    isWindowCapture ? "WINDOW" : "SYSTEM",
+                    targetProcessId);
+            OutputDebugStringA(log);
+        }
+    }
     
 public:
     bool InitializeForApplication(HWND hwnd) {
         CoInitialize(nullptr);
+        InitializeExclusions();
         
         QueryPerformanceFrequency(&performanceFrequency);
         QueryPerformanceCounter(&captureStartTime);
         
+        // Получаем процесс целевого окна
         GetWindowThreadProcessId(hwnd, &targetProcessId);
+        isWindowCapture = true;  // Устанавливаем режим захвата окна
+        
+        // При захвате конкретного окна НЕ фильтруем его звук
+        filterConferenceAudio = true;  // Но фильтруем другие процессы
         
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, targetProcessId);
         if (hProcess) {
@@ -445,7 +695,8 @@ public:
         }
         
         char log[256];
-        sprintf_s(log, "Initializing audio capture for PID: %lu\n", targetProcessId);
+        sprintf_s(log, "Window capture mode: PID=%lu, App=%ls\n", 
+                targetProcessId, applicationName.c_str());
         OutputDebugStringA(log);
         
         HRESULT hr = CoCreateInstance(
@@ -504,98 +755,25 @@ public:
         );
         
         if (SUCCEEDED(hr)) {
-            StartSessionMonitoring();
-            OutputDebugStringA("Application audio capture initialized successfully\n");
+            OutputDebugStringA("Window audio capture initialized (smart filtering)\n");
         }
         
         return SUCCEEDED(hr);
     }
-    
-    void StartSessionMonitoring() {
-        std::thread monitorThread([this]() {
-            CoInitialize(nullptr);
-            
-            while (isCapturing) {
-                UpdateTargetProcessVolume();
-                Sleep(100);
-            }
-            
-            CoUninitialize();
-        });
-        monitorThread.detach();
-    }
-    
-    void UpdateTargetProcessVolume() {
-        if (!sessionManager) return;
-        
-        IAudioSessionEnumerator* sessionEnumerator = nullptr;
-        HRESULT hr = sessionManager->GetSessionEnumerator(&sessionEnumerator);
-        if (FAILED(hr)) return;
-        
-        int sessionCount = 0;
-        sessionEnumerator->GetCount(&sessionCount);
-        
-        bool foundTarget = false;
-        float maxVolume = 0.0f;
-        
-        for (int i = 0; i < sessionCount; i++) {
-            IAudioSessionControl* sessionControl = nullptr;
-            hr = sessionEnumerator->GetSession(i, &sessionControl);
-            if (FAILED(hr)) continue;
-            
-            IAudioSessionControl2* sessionControl2 = nullptr;
-            hr = sessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&sessionControl2);
-            
-            if (SUCCEEDED(hr)) {
-                DWORD processId = 0;
-                hr = sessionControl2->GetProcessId(&processId);
-                
-                if (SUCCEEDED(hr) && processId == targetProcessId) {
-                    AudioSessionState state;
-                    hr = sessionControl->GetState(&state);
-                    
-                    if (SUCCEEDED(hr) && state == AudioSessionStateActive) {
-                        ISimpleAudioVolume* simpleVolume = nullptr;
-                        hr = sessionControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&simpleVolume);
-                        
-                        if (SUCCEEDED(hr)) {
-                            float masterVolume = 0.0f;
-                            simpleVolume->GetMasterVolume(&masterVolume);
-                            
-                            IAudioMeterInformation* meterInfo = nullptr;
-                            hr = sessionControl->QueryInterface(__uuidof(IAudioMeterInformation), (void**)&meterInfo);
-                            
-                            if (SUCCEEDED(hr)) {
-                                float peakValue = 0.0f;
-                                meterInfo->GetPeakValue(&peakValue);
-                                maxVolume = peakValue * masterVolume;
-                                meterInfo->Release();
-                            }
-                            
-                            simpleVolume->Release();
-                        }
-                        
-                        foundTarget = true;
-                    }
-                }
-                
-                sessionControl2->Release();
-            }
-            
-            sessionControl->Release();
-        }
-        
-        targetProcessVolume = maxVolume;
-        isTargetProcessActive = foundTarget;
-        
-        sessionEnumerator->Release();
-    }
-    
+
     bool InitializeForSystemAudio() {
         CoInitialize(nullptr);
+        InitializeExclusions();
         
         QueryPerformanceFrequency(&performanceFrequency);
         QueryPerformanceCounter(&captureStartTime);
+        
+        // Системный захват - нет целевого окна
+        targetProcessId = 0;
+        isWindowCapture = false;
+        filterConferenceAudio = true;  // Включаем полную фильтрацию
+        
+        OutputDebugStringA("System audio mode: Full conference filtering enabled\n");
         
         HRESULT hr = CoCreateInstance(
             __uuidof(MMDeviceEnumerator),
@@ -611,6 +789,15 @@ public:
             eRender,
             eConsole,
             &device
+        );
+        
+        if (FAILED(hr)) return false;
+        
+        hr = device->Activate(
+            __uuidof(IAudioSessionManager2),
+            CLSCTX_ALL,
+            nullptr,
+            (void**)&sessionManager
         );
         
         if (FAILED(hr)) return false;
@@ -643,7 +830,33 @@ public:
             (void**)&captureClient
         );
         
+        OutputDebugStringA("System audio capture initialized with smart filtering\n");
         return SUCCEEDED(hr);
+    }
+    
+    void SetFilterConferenceAudio(bool enable) {
+        filterConferenceAudio = enable;
+        char log[256];
+        sprintf_s(log, "Conference audio filtering: %s (mode: %s)\n", 
+                enable ? "ENABLED" : "DISABLED",
+                isWindowCapture ? "WINDOW" : "SYSTEM");
+        OutputDebugStringA(log);
+    }
+    
+    void AddExcludedProcess(DWORD processId) {
+        excludedProcessIds.insert(processId);
+    }
+    
+    void RemoveExcludedProcess(DWORD processId) {
+        excludedProcessIds.erase(processId);
+    }
+    
+    void AddExcludedProcessName(const std::wstring& processName) {
+        excludedProcessNames.insert(processName);
+    }
+    
+    void RemoveExcludedProcessName(const std::wstring& processName) {
+        excludedProcessNames.erase(processName);
     }
     
     void StartCapture() {
@@ -657,6 +870,16 @@ public:
             accumulationBuffer.reserve(192000);
         }
         
+        // Запускаем мониторинг сессий
+        monitorThread = std::thread([this]() {
+            CoInitialize(nullptr);
+            while (isCapturing) {
+                UpdateAudioSessions();
+                Sleep(100); // Обновляем каждые 100мс
+            }
+            CoUninitialize();
+        });
+        
         HRESULT hr = audioClient->Start();
         
         if (SUCCEEDED(hr)) {
@@ -665,7 +888,12 @@ public:
                 CaptureLoop();
                 CoUninitialize();
             });
-            OutputDebugStringA("Application audio capture started\n");
+            
+            char log[256];
+            sprintf_s(log, "Audio capture started (Mode: %s, Filter: %s)\n",
+                    isWindowCapture ? "WINDOW" : "SYSTEM",
+                    filterConferenceAudio ? "ON" : "OFF");
+            OutputDebugStringA(log);
         }
     }
     
@@ -706,11 +934,7 @@ public:
         size_t sampleCount = numFrames * waveFormat->nChannels;
         std::vector<float> samples(sampleCount);
         
-        // ДИАГНОСТИКА: Проверяем что приходит от Windows
-        static int debugCounter = 0;
-        debugCounter++;
-        
-        // Конвертируем в float (существующий код)
+        // Конвертируем в float
         bool hasNonZero = false;
         
         if (waveFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
@@ -767,85 +991,9 @@ public:
             }
         }
         
-        // ============================================
-        // ТЕСТОВЫЙ РЕЖИМ: Генерация тестового сигнала
-        // ============================================
-        if (diagnosticMode) {
-            diagnosticFrameCount++;
-            
-            // Первые 5 секунд - генерируем тестовый сигнал
-            // Следующие 5 секунд - реальный захват
-            // Потом снова тестовый и т.д.
-            int cyclePosition = (diagnosticFrameCount / 100) % 2; // Меняем каждые ~2 секунды при 48kHz
-            
-            if (cyclePosition == 0) {
-                // ГЕНЕРИРУЕМ ТЕСТОВЫЙ СИГНАЛ (синусоида 440 Гц)
-                float omega = 2.0f * 3.14159265f * testSignalFrequency / waveFormat->nSamplesPerSec;
-                
-                for (size_t i = 0; i < numFrames; i++) {
-                    float sampleValue = testSignalAmplitude * sinf(omega * testSignalPhase);
-                    testSignalPhase++;
-                    
-                    // Записываем во все каналы
-                    for (UINT ch = 0; ch < waveFormat->nChannels; ch++) {
-                        samples[i * waveFormat->nChannels + ch] = sampleValue;
-                    }
-                }
-                
-                // Логируем переключение на тестовый сигнал
-                if (diagnosticFrameCount % 100 == 1) {
-                    char log[256];
-                    sprintf_s(log, "[TEST-SIGNAL] Frame %d: Generating 440Hz sine wave, amplitude=%.2f\n",
-                            diagnosticFrameCount, testSignalAmplitude);
-                    OutputDebugStringA(log);
-                }
-                
-                hasNonZero = true; // Гарантируем что есть данные
-            } else {
-                // РЕАЛЬНЫЙ ЗАХВАТ - добавляем маркер для идентификации
-                // Добавляем очень тихий пилот-тон 1kHz чтобы отличить от тишины
-                float pilotFreq = 1000.0f;
-                float pilotAmp = 0.001f; // Очень тихий
-                float omega = 2.0f * 3.14159265f * pilotFreq / waveFormat->nSamplesPerSec;
-                
-                for (size_t i = 0; i < sampleCount; i++) {
-                    samples[i] += pilotAmp * sinf(omega * (testSignalPhase + i));
-                }
-                testSignalPhase += sampleCount;
-                
-                if (diagnosticFrameCount % 100 == 51) {
-                    char log[256];
-                    sprintf_s(log, "[REAL-CAPTURE] Frame %d: Real audio + pilot tone, hasData=%s\n",
-                            diagnosticFrameCount, hasNonZero ? "YES" : "NO");
-                    OutputDebugStringA(log);
-                }
-            }
-        }
-        
-        // ============================================
-        // ДЕТАЛЬНАЯ ДИАГНОСТИКА
-        // ============================================
-        if (debugCounter <= 10 || debugCounter % 100 == 0) {
-            // Вычисляем RMS (среднеквадратичное) для оценки громкости
-            float rms = 0;
-            float maxSample = 0;
-            for (size_t i = 0; i < sampleCount && i < 1000; i++) {
-                rms += samples[i] * samples[i];
-                if (fabs(samples[i]) > maxSample) maxSample = fabs(samples[i]);
-            }
-            rms = sqrt(rms / min(sampleCount, (size_t)1000));
-            
-            char log[512];
-            sprintf_s(log, "[AUDIO-DIAG] Frame %d: Format=0x%X, Bits=%d, Ch=%d, Samples=%u, RMS=%.6f, Max=%.6f, Mode=%s\n",
-                    debugCounter, waveFormat->wFormatTag, waveFormat->wBitsPerSample,
-                    waveFormat->nChannels, numFrames, rms, maxSample,
-                    diagnosticMode ? (diagnosticFrameCount/100 % 2 == 0 ? "TEST_SIGNAL" : "REAL+PILOT") : "NORMAL");
-            OutputDebugStringA(log);
-        }
-        
-        // НЕ применяем фильтрацию в режиме диагностики
-        if (!diagnosticMode && targetProcessId != 0) {
-            ApplyProcessFilter(samples);
+        // ПРИМЕНЯЕМ ФИЛЬТРАЦИЮ только если включена
+        if (filterConferenceAudio) {
+            ApplySessionBasedFiltering(samples);
         }
         
         // Добавляем в буфер
@@ -858,24 +1006,38 @@ public:
         SendBufferedFrames();
     }
     
-    void ApplyProcessFilter(std::vector<float>& samples) {
-        // ВРЕМЕННО ОТКЛЮЧЕНО для отладки
-        return;
+    void ApplySessionBasedFiltering(std::vector<float>& samples) {
+        std::lock_guard<std::mutex> lock(sessionsMutex);
         
-        /* Оригинальный код фильтрации
-        if (!isTargetProcessActive) {
-            for (auto& sample : samples) {
-                sample *= 0.1f;
-            }
-        } else {
-            float volume = targetProcessVolume.load();
-            if (volume < 0.1f) {
-                for (auto& sample : samples) {
-                    sample *= 0.2f;
-                }
+        // Подсчитываем сколько сессий исключено
+        int excludedCount = 0;
+        float totalExcludedVolume = 0.0f;
+        
+        for (const auto& pair : activeSessions) {
+            if (!pair.second.shouldCapture) {
+                excludedCount++;
+                totalExcludedVolume += pair.second.currentVolume;
             }
         }
-        */
+        
+        // Если есть исключенные сессии с активным звуком, приглушаем общий сигнал
+        if (excludedCount > 0 && totalExcludedVolume > 0.01f) {
+            // Применяем адаптивное подавление
+            float suppressionFactor = 1.0f - (totalExcludedVolume * 0.8f);
+            suppressionFactor = (std::max)(0.1f, suppressionFactor); // Минимум 10% от оригинала
+            
+            for (auto& sample : samples) {
+                sample *= suppressionFactor;
+            }
+            
+            static int logCounter = 0;
+            if (++logCounter % 100 == 0) {
+                char log[256];
+                sprintf_s(log, "Filtering: Excluded %d sessions, suppression: %.2f\n",
+                        excludedCount, suppressionFactor);
+                OutputDebugStringA(log);
+            }
+        }
     }
     
     void SendBufferedFrames() {
@@ -892,16 +1054,9 @@ public:
             frameData->sampleRate = waveFormat->nSamplesPerSec;
             frameData->channels = waveFormat->nChannels;
             frameData->timestamp = g_syncManager.GetAudioTimestamp();
-            frameData->isSystemAudio = (targetProcessId == 0);
+            frameData->isSystemAudio = !isWindowCapture;
             
-            // В режиме диагностики добавляем маркер
-            if (diagnosticMode) {
-                char diagName[256];
-                sprintf_s(diagName, "DIAG_%s_%s", 
-                        (diagnosticFrameCount/100 % 2 == 0) ? "TEST" : "REAL",
-                        applicationName.empty() ? "System" : "App");
-                frameData->applicationName = diagName;
-            } else if (!applicationName.empty()) {
+            if (!applicationName.empty()) {
                 char appName[256] = {0};
                 wcstombs(appName, applicationName.c_str(), sizeof(appName) - 1);
                 frameData->applicationName = appName;
@@ -913,25 +1068,6 @@ public:
             std::copy(accumulationBuffer.begin(), 
                     accumulationBuffer.begin() + frameSampleCount,
                     frameData->samples);
-            
-            // ДИАГНОСТИКА: Проверяем что отправляем
-            static int sendCounter = 0;
-            sendCounter++;
-            if (sendCounter <= 10 || sendCounter % 100 == 0) {
-                float maxVal = 0;
-                float rms = 0;
-                for (size_t i = 0; i < frameSampleCount; i++) {
-                    maxVal = (std::max)(maxVal, std::abs(frameData->samples[i]));
-                    rms += frameData->samples[i] * frameData->samples[i];
-                }
-                rms = sqrt(rms / frameSampleCount);
-                
-                char log[256];
-                sprintf_s(log, "[SEND-DIAG] Sending frame %d: RMS=%.6f, MAX=%.6f, samples=%d, source=%s\n",
-                        sendCounter, rms, maxVal, frameData->numSamples,
-                        frameData->applicationName.c_str());
-                OutputDebugStringA(log);
-            }
             
             accumulationBuffer.erase(accumulationBuffer.begin(), 
                                 accumulationBuffer.begin() + frameSampleCount);
@@ -966,6 +1102,10 @@ public:
             audioClient->Stop();
         }
         
+        if (monitorThread.joinable()) {
+            monitorThread.join();
+        }
+        
         if (captureThread.joinable()) {
             captureThread.join();
         }
@@ -975,7 +1115,17 @@ public:
             accumulationBuffer.clear();
         }
         
-        OutputDebugStringA("Application audio capture stopped\n");
+        {
+            std::lock_guard<std::mutex> lock(sessionsMutex);
+            for (auto& pair : activeSessions) {
+                if (pair.second.control) {
+                    pair.second.control->Release();
+                }
+            }
+            activeSessions.clear();
+        }
+        
+        OutputDebugStringA("Audio capture stopped\n");
     }
     
     ~ApplicationAudioCapture() {
@@ -1002,7 +1152,7 @@ static CaptureSource g_currentSource;
 // Тестовый метод
 napi_value TestMethod(napi_env env, napi_callback_info info) {
     napi_value result;
-    napi_create_string_utf8(env, "Windows Native Module v1.0 - Application Audio Support", NAPI_AUTO_LENGTH, &result);
+    napi_create_string_utf8(env, "Windows Native Module v2.0 - Conference Audio Filtering", NAPI_AUTO_LENGTH, &result);
     return result;
 }
 
@@ -1195,17 +1345,34 @@ napi_value SetCaptureSource(napi_env env, napi_callback_info info) {
 
 // Установка качества захвата
 napi_value SetCaptureQuality(napi_env env, napi_callback_info info) {
-    // ИГНОРИРУЕМ входящие параметры
-    // Всегда используем минимум для экономии CPU  
+    size_t argc = 1;
+    napi_value argv[1];
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    
+    if (argc < 1) {
+        napi_throw_type_error(env, nullptr, "Expected quality object");
+        return nullptr;
+    }
+    
+    napi_value widthVal, heightVal, fpsVal;
+    napi_get_named_property(env, argv[0], "width", &widthVal);
+    napi_get_named_property(env, argv[0], "height", &heightVal);
+    napi_get_named_property(env, argv[0], "fps", &fpsVal);
+    
+    int width = 1920, height = 1080, fps = 30;
+    napi_get_value_int32(env, widthVal, &width);
+    napi_get_value_int32(env, heightVal, &height);
+    napi_get_value_int32(env, fpsVal, &fps);
+    
     {
         std::lock_guard<std::mutex> lock(g_quality.mutex);
-        g_quality.width = 1;
-        g_quality.height = 1;
-        g_quality.fps = 1;
+        g_quality.width = width;
+        g_quality.height = height;
+        g_quality.fps = fps;
     }
     
     if (g_screenCapture) {
-        g_screenCapture->SetQuality(1, 1, 1);
+        g_screenCapture->SetQuality(width, height, fps);
     }
     
     napi_value result;
@@ -1213,6 +1380,65 @@ napi_value SetCaptureQuality(napi_env env, napi_callback_info info) {
     napi_value success;
     napi_get_boolean(env, true, &success);
     napi_set_named_property(env, result, "success", success);
+    
+    return result;
+}
+
+// НОВАЯ ФУНКЦИЯ: Установка фильтрации аудио
+napi_value SetAudioFilter(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    
+    if (argc < 1) {
+        napi_throw_type_error(env, nullptr, "Expected filter settings object");
+        return nullptr;
+    }
+    
+    // Получаем параметры фильтрации
+    napi_value filterConferenceVal;
+    napi_get_named_property(env, argv[0], "filterConferenceAudio", &filterConferenceVal);
+    
+    bool filterConference = true;
+    napi_get_value_bool(env, filterConferenceVal, &filterConference);
+    
+    // Применяем настройки
+    if (g_appAudioCapture) {
+        g_appAudioCapture->SetFilterConferenceAudio(filterConference);
+    }
+    
+    // Обработка дополнительных исключений
+    napi_value excludeProcessesVal;
+    if (napi_get_named_property(env, argv[0], "excludeProcesses", &excludeProcessesVal) == napi_ok) {
+        uint32_t arrayLength;
+        napi_get_array_length(env, excludeProcessesVal, &arrayLength);
+        
+        for (uint32_t i = 0; i < arrayLength; i++) {
+            napi_value element;
+            napi_get_element(env, excludeProcessesVal, i, &element);
+            
+            char processName[256];
+            size_t length;
+            napi_get_value_string_utf8(env, element, processName, sizeof(processName), &length);
+            
+            if (g_appAudioCapture) {
+                std::wstring wProcessName(processName, processName + length);
+                g_appAudioCapture->AddExcludedProcessName(wProcessName);
+            }
+        }
+    }
+    
+    napi_value result;
+    napi_create_object(env, &result);
+    
+    napi_value success;
+    napi_get_boolean(env, true, &success);
+    napi_set_named_property(env, result, "success", success);
+    
+    napi_value message;
+    std::string msg = filterConference ? "Conference audio filtering enabled" : "Conference audio filtering disabled";
+    napi_create_string_utf8(env, msg.c_str(), NAPI_AUTO_LENGTH, &message);
+    napi_set_named_property(env, result, "message", message);
     
     return result;
 }
@@ -1255,7 +1481,7 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
         }
     }
     
-    // Запускаем аудио захват с поддержкой захвата от приложений
+    // Запускаем аудио захват с фильтрацией
     if (g_currentSource.type == "window") {
         try {
             HWND hwnd = (HWND)std::stoull(g_currentSource.id);
@@ -1266,12 +1492,12 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
                 if (g_appAudioCapture->InitializeForApplication(hwnd)) {
                     g_appAudioCapture->StartCapture();
                     audioStarted = true;
-                    OutputDebugStringA("Started application-specific audio capture\n");
+                    OutputDebugStringA("Started application audio capture with filtering\n");
                 } else {
                     if (g_appAudioCapture->InitializeForSystemAudio()) {
                         g_appAudioCapture->StartCapture();
                         audioStarted = true;
-                        OutputDebugStringA("Fallback to system audio capture\n");
+                        OutputDebugStringA("Fallback to system audio capture with filtering\n");
                     }
                 }
             }
@@ -1283,7 +1509,7 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
         if (g_appAudioCapture->InitializeForSystemAudio()) {
             g_appAudioCapture->StartCapture();
             audioStarted = true;
-            OutputDebugStringA("Started system audio capture\n");
+            OutputDebugStringA("Started system audio capture with filtering\n");
         }
     }
     
@@ -1299,7 +1525,7 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     napi_value message;
     std::string msg = "Started: ";
     if (videoStarted) msg += "video ";
-    if (audioStarted) msg += "audio";
+    if (audioStarted) msg += "audio (with conference filtering)";
     napi_create_string_utf8(env, msg.c_str(), NAPI_AUTO_LENGTH, &message);
     napi_set_named_property(env, result, "message", message);
     
@@ -1500,6 +1726,7 @@ napi_value Init(napi_env env, napi_value exports) {
         {"stopCapture", nullptr, StopCapture, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCaptureQuality", nullptr, SetCaptureQuality, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCaptureSource", nullptr, SetCaptureSource, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setAudioFilter", nullptr, SetAudioFilter, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setWebRTCVideoCallback", nullptr, SetWebRTCVideoCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setWebRTCAudioCallback", nullptr, SetWebRTCAudioCallback, nullptr, nullptr, nullptr, napi_default, nullptr}
     };

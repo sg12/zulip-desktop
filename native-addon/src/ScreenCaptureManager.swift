@@ -528,7 +528,30 @@ actor CaptureActor {
                 streamConfig.excludesCurrentProcessAudio = true
                 streamConfig.sampleRate = 48000
                 streamConfig.channelCount = 2
-                print("🎵 Audio configured: 48kHz, 2 channels")
+                
+                // ДОБАВИТЬ: Исключаем звук из Electron приложения
+                // Найдем процесс Electron и исключим его
+                let content = try await SCShareableContent.current
+                for app in content.applications {
+                    // Проверяем имя вашего Electron приложения
+                    if app.applicationName.contains("YourAppName") || 
+                    app.bundleIdentifier.contains("your.app.identifier") {
+                        // Создаем фильтр, исключающий это приложение
+                        if let filter = contentFilter as? SCContentFilter {
+                            // Пересоздаем фильтр с исключением
+                            if let display = content.displays.first {
+                                contentFilter = SCContentFilter(
+                                    display: display,
+                                    excludingApplications: [app],
+                                    exceptingWindows: []
+                                )
+                            }
+                        }
+                        break
+                    }
+                }
+                
+                print("🎵 Audio configured with app exclusion")
             }
         }
         
