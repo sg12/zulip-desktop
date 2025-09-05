@@ -1148,14 +1148,12 @@ static CaptureSource g_currentSource;
 
 // === N-API функции ===
 
-// Тестовый метод
 napi_value TestMethod(napi_env env, napi_callback_info info) {
     napi_value result;
     napi_create_string_utf8(env, "Windows Native Module v2.0 - Conference Audio Filtering", NAPI_AUTO_LENGTH, &result);
     return result;
 }
 
-// Callback функция для перечисления окон
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     if (!IsWindowVisible(hwnd)) return TRUE;
     
