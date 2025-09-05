@@ -1141,7 +1141,6 @@ public:
     }
 };
 
-// Глобальные экземпляры захвата
 static std::unique_ptr<DXGIScreenCapture> g_screenCapture;
 static std::unique_ptr<ApplicationAudioCapture> g_appAudioCapture;
 static CaptureSource g_currentSource;
