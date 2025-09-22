@@ -2,9 +2,9 @@ name: Build Windows Native Module
 
 on:
   push:
-    branches: [ main, master, native-win-test, native-win-4 ]
+    branches: [ main, master, native-win-test, native-win-5 ]
   pull_request:
-    branches: [ main, master, native-win-test, native-win-4 ]
+    branches: [ main, master, native-win-test, native-win-5 ]
   workflow_dispatch:
 
 jobs:
