@@ -326,6 +326,128 @@ export class JitsiManager {
         log.info("[JITSI-MANAGER] Debug UI enabled:", this.config.enableDebugUI);
     }
 
+    private audioWatermarkGenerator = {
+        userId: null as string | null,
+        sequence: 0,
+        
+        // Генерация уникального паттерна для пользователя
+        generatePattern(userId: string): Float32Array {
+            // Создаем ультразвуковой сигнал (18-20 кГц) - неслышимый для человека
+            const pattern = new Float32Array(48); // 1ms при 48kHz
+            const freq = 19000 + (this.hashCode(userId) % 1000); // 19-20 кГц
+            
+            for (let i = 0; i < pattern.length; i++) {
+                pattern[i] = Math.sin(2 * Math.PI * freq * i / 48000) * 0.001; // Очень тихий
+            }
+            
+            return pattern;
+        },
+        
+        hashCode(str: string): number {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = ((hash << 5) - hash) + str.charCodeAt(i);
+                hash = hash & hash;
+            }
+            return Math.abs(hash);
+        },
+        
+        // Внедрение watermark в аудио
+        embedWatermark(audioData: Float32Array, userId: string): Float32Array {
+            const pattern = this.generatePattern(userId);
+            const output = new Float32Array(audioData.length);
+            
+            // Копируем основной сигнал
+            output.set(audioData);
+            
+            // Добавляем watermark в начало и конец
+            for (let i = 0; i < pattern.length && i < output.length; i++) {
+                output[i] += pattern[i];
+                output[output.length - pattern.length + i] += pattern[i];
+            }
+            
+            return output;
+        }
+    };
+
+    // Детектор watermarks
+    private audioWatermarkDetector = {
+        myUserId: null as string | null,
+        myPattern: null as Float32Array | null,
+        duckingActive: false,
+        duckingLevel: 0.1, // Приглушаем до 10%
+        
+        // Инициализация с ID пользователя
+        initialize(userId: string) {
+            this.myUserId = userId;
+            this.myPattern = this.generatePattern(userId);
+        },
+        
+        // Детектирование своего watermark
+        detectWatermark(audioData: Float32Array): boolean {
+            if (!this.myPattern) return false;
+            
+            // Используем корреляцию для поиска паттерна
+            const correlation = this.crossCorrelate(
+                audioData.slice(0, 100), // Проверяем начало
+                this.myPattern
+            );
+            
+            // Если корреляция высокая - это наш watermark
+            return correlation > 0.7;
+        },
+        
+        crossCorrelate(signal: Float32Array, pattern: Float32Array): number {
+            let sum = 0;
+            let signalEnergy = 0;
+            let patternEnergy = 0;
+            
+            for (let i = 0; i < pattern.length && i < signal.length; i++) {
+                sum += signal[i] * pattern[i];
+                signalEnergy += signal[i] * signal[i];
+                patternEnergy += pattern[i] * pattern[i];
+            }
+            
+            if (signalEnergy === 0 || patternEnergy === 0) return 0;
+            return sum / (Math.sqrt(signalEnergy) * Math.sqrt(patternEnergy));
+        },
+        
+        // Применение ducking
+        applyDucking(audioData: Float32Array): Float32Array {
+            if (this.detectWatermark(audioData)) {
+                // Плавное приглушение
+                const output = new Float32Array(audioData.length);
+                const fadeLength = 480; // 10ms при 48kHz
+                
+                for (let i = 0; i < audioData.length; i++) {
+                    let gain = 1.0;
+                    
+                    // Плавное затухание в начале
+                    if (i < fadeLength) {
+                        gain = this.duckingLevel + (1 - this.duckingLevel) * (i / fadeLength);
+                    }
+                    // Основная часть - приглушено
+                    else if (i < audioData.length - fadeLength) {
+                        gain = this.duckingLevel;
+                    }
+                    // Плавное восстановление в конце
+                    else {
+                        const fadePos = i - (audioData.length - fadeLength);
+                        gain = this.duckingLevel + (1 - this.duckingLevel) * (1 - fadePos / fadeLength);
+                    }
+                    
+                    output[i] = audioData[i] * gain;
+                }
+                
+                this.duckingActive = true;
+                return output;
+            }
+            
+            this.duckingActive = false;
+            return audioData;
+        }
+    };
+
 
     private async shouldUseNativeCapture(): Promise<boolean> {
         // Проверяем доступность плагина
@@ -2515,6 +2637,151 @@ export class JitsiManager {
             // Инъекция debug overlay
             await this.injectDebugOverlay();
 
+            // НОВОЕ: Добавляем систему ducking для входящего аудио
+            await this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    console.log('[AUDIO-DUCKING] Installing incoming audio ducking system...');
+                    
+                    // Система приглушения эха для входящего аудио
+                    window.incomingAudioDucking = {
+                        enabled: true,
+                        currentDuckingLevel: 1.0,
+                        targetDuckingLevel: 1.0,
+                        duckingAmount: 0.15, // Приглушаем до 15%
+                        fadeTime: 0.05, // 50ms для плавного перехода
+                        processors: new Map(),
+                        
+                        // Обработка каждого входящего аудио трека
+                        processIncomingTrack: function(track, participantId) {
+                            if (!track || !track.stream) return;
+                            
+                            try {
+                                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                                const source = audioContext.createMediaStreamSource(track.stream);
+                                const gainNode = audioContext.createGain();
+                                const destination = audioContext.createMediaStreamDestination();
+                                
+                                // Подключаем цепочку
+                                source.connect(gainNode);
+                                gainNode.connect(destination);
+                                
+                                // Сохраняем для управления
+                                this.processors.set(participantId, {
+                                    context: audioContext,
+                                    gainNode: gainNode,
+                                    source: source,
+                                    destination: destination
+                                });
+                                
+                                console.log('[AUDIO-DUCKING] Processor created for participant:', participantId);
+                                
+                                // Заменяем оригинальный трек на обработанный
+                                const processedTrack = destination.stream.getAudioTracks()[0];
+                                if (processedTrack) {
+                                    track.track = processedTrack;
+                                }
+                                
+                            } catch (error) {
+                                console.error('[AUDIO-DUCKING] Error processing track:', error);
+                            }
+                        },
+                        
+                        // Обновление уровня приглушения
+                        updateDucking: function(shouldDuck) {
+                            this.targetDuckingLevel = shouldDuck ? this.duckingAmount : 1.0;
+                            
+                            // Применяем ко всем процессорам
+                            this.processors.forEach((processor, participantId) => {
+                                if (processor.gainNode) {
+                                    processor.gainNode.gain.setTargetAtTime(
+                                        this.targetDuckingLevel,
+                                        processor.context.currentTime,
+                                        this.fadeTime
+                                    );
+                                }
+                            });
+                            
+                            console.log('[AUDIO-DUCKING] Updated ducking level to:', this.targetDuckingLevel);
+                        },
+                        
+                        // Очистка процессора
+                        removeProcessor: function(participantId) {
+                            const processor = this.processors.get(participantId);
+                            if (processor) {
+                                try {
+                                    processor.source.disconnect();
+                                    processor.gainNode.disconnect();
+                                    processor.context.close();
+                                } catch (e) {}
+                                this.processors.delete(participantId);
+                                console.log('[AUDIO-DUCKING] Removed processor for:', participantId);
+                            }
+                        }
+                    };
+                    
+                    // Мониторинг состояния ducking из системного аудио
+                    setInterval(() => {
+                        if (window.systemAudioDucking !== undefined) {
+                            window.incomingAudioDucking.updateDucking(window.systemAudioDucking);
+                        }
+                    }, 100);
+                    
+                    // Перехватываем добавление треков
+                    if (window.APP?.conference) {
+                        const checkForRemoteTracks = setInterval(() => {
+                            if (!window.APP?.conference?._room) return;
+                            
+                            clearInterval(checkForRemoteTracks);
+                            
+                            const room = window.APP.conference._room;
+                            
+                            // Слушаем события добавления/удаления треков
+                            if (window.JitsiMeetJS?.events?.track) {
+                                room.on(
+                                    window.JitsiMeetJS.events.track.TRACK_ADDED,
+                                    (track) => {
+                                        if (track && track.getType() === 'audio' && !track.isLocal()) {
+                                            const participantId = track.getParticipantId();
+                                            console.log('[AUDIO-DUCKING] Remote audio track added from:', participantId);
+                                            window.incomingAudioDucking.processIncomingTrack(track, participantId);
+                                        }
+                                    }
+                                );
+                                
+                                room.on(
+                                    window.JitsiMeetJS.events.track.TRACK_REMOVED,
+                                    (track) => {
+                                        if (track && track.getType() === 'audio' && !track.isLocal()) {
+                                            const participantId = track.getParticipantId();
+                                            console.log('[AUDIO-DUCKING] Remote audio track removed from:', participantId);
+                                            window.incomingAudioDucking.removeProcessor(participantId);
+                                        }
+                                    }
+                                );
+                            }
+                            
+                            // Обрабатываем уже существующие треки
+                            const existingTracks = room.getRemoteTracks();
+                            if (existingTracks) {
+                                existingTracks.forEach(track => {
+                                    if (track && track.getType() === 'audio') {
+                                        const participantId = track.getParticipantId();
+                                        window.incomingAudioDucking.processIncomingTrack(track, participantId);
+                                    }
+                                });
+                            }
+                            
+                            console.log('[AUDIO-DUCKING] System initialized');
+                        }, 500);
+                        
+                        // Таймаут на случай если конференция не инициализируется
+                        setTimeout(() => clearInterval(checkForRemoteTracks), 20000);
+                    }
+                    
+                    return true;
+                })();
+            `);
+
             // Настройка debug callback для native capture
             if (this.nativeCapture) {
                 this.nativeCapture.setDebugCallback((packetInfo) => {
@@ -3441,6 +3708,13 @@ export class JitsiManager {
             // Если нет звука, пропускаем нормализацию
             if (!levels.hasAudio) {
                 log.warn(`[AUDIO] No audio detected in frame ${this.state.audioFrameCount}`);
+                // Сбрасываем VAD при тишине
+                if (this.audioWatermarkSystem.vadEnabled) {
+                    this.audioWatermarkSystem.silenceFrameCount++;
+                    if (this.audioWatermarkSystem.silenceFrameCount > 50) {
+                        this.audioWatermarkSystem.resetVAD();
+                    }
+                }
             }
             
             const { processedLeft, processedRight } = this.normalizeAudio(
@@ -3449,25 +3723,377 @@ export class JitsiManager {
                 levels
             );
 
+            // Инициализируем систему watermark если еще не готова
+            if (!this.audioWatermarkSystem.initialized) {
+                this.initializeWatermarkSystem();
+            }
+
+            // Получаем состояние микрофона и userId из Jitsi
             if (this.state.window && !this.state.window.isDestroyed()) {
                 this.state.window.webContents.executeJavaScript(`
-                (function() {
-                    if (window.participantAudioMixer && window.audioRoutingMode === 'presenter_mix') {
-                    // Получаем смикшированные голоса участников
-                    const participantMix = window.participantAudioMixer.getMixedOutput();
-                    
-                    // Микшируем с системным звуком
-                    // Это происходит в sendAudioToJitsi
-                    window.pendingParticipantAudio = participantMix;
-                    }
-                })();
-                `).catch(() => {});
-            }
+                    (function() {
+                        let localAudioActive = false;
+                        let localAudioLevel = 0;
                         
+                        if (window.APP?.conference) {
+                            const localAudioTrack = window.APP.conference.getLocalAudioTrack();
+                            if (localAudioTrack && !localAudioTrack.isMuted()) {
+                                if (localAudioTrack.getAudioLevel) {
+                                    localAudioLevel = localAudioTrack.getAudioLevel();
+                                    localAudioActive = localAudioLevel > 0.01;
+                                } else {
+                                    localAudioActive = true;
+                                }
+                            }
+                        }
+                        
+                        window.localMicrophoneActive = localAudioActive;
+                        window.localMicrophoneLevel = localAudioLevel;
+                        
+                        // Обработка микширования участников
+                        if (window.participantAudioMixer && window.audioRoutingMode === 'presenter_mix') {
+                            const participantMix = window.participantAudioMixer.getMixedOutput();
+                            window.pendingParticipantAudio = participantMix;
+                        }
+                        
+                        return { 
+                            micActive: localAudioActive, 
+                            micLevel: localAudioLevel,
+                            userId: window.APP?.conference?._room?.myUserId() || null
+                        };
+                    })();
+                `).then(result => {
+                    if (result && result.userId) {
+                        this.audioWatermarkSystem.localMicActive = result.micActive;
+                        this.audioWatermarkSystem.localMicLevel = result.micLevel;
+                        
+                        if (!this.audioWatermarkSystem.userId) {
+                            this.audioWatermarkSystem.userId = result.userId;
+                            log.info(`[AUDIO-WATERMARK] Initialized with userId: ${result.userId}`);
+                        }
+                    }
+                }).catch(() => {});
+            }
+
+            // Применяем VAD или простую проверку микрофона
+            let shouldEmbedWatermark = false;
+            
+            if (this.audioWatermarkSystem.vadEnabled && levels.hasAudio) {
+                // Используем VAD для определения речи
+                this.audioWatermarkSystem.updateSpeechState(processedLeft);
+                shouldEmbedWatermark = this.audioWatermarkSystem.isSpeaking && this.audioWatermarkSystem.userId !== null;
+                
+                // Логирование изменений состояния
+                if (this.state.audioFrameCount % 50 === 0 && this.audioWatermarkSystem.isSpeaking) {
+                    log.info(`[AUDIO-VAD] Speaking detected, frames: ${this.audioWatermarkSystem.speechFrameCount}`);
+                }
+            } else if (!this.audioWatermarkSystem.vadEnabled) {
+                // Fallback на простую проверку микрофона
+                shouldEmbedWatermark = this.audioWatermarkSystem.localMicActive && this.audioWatermarkSystem.userId !== null;
+            }
+
+            // Добавляем watermark если нужно
+            let finalLeft = processedLeft;
+            let finalRight = processedRight;
+            
+            if (shouldEmbedWatermark) {
+                finalLeft = this.audioWatermarkSystem.embedWatermark(processedLeft, this.audioWatermarkSystem.userId!);
+                finalRight = this.audioWatermarkSystem.embedWatermark(processedRight, this.audioWatermarkSystem.userId!);
+                
+                if (this.state.audioFrameCount % 100 === 0) {
+                    log.info(`[AUDIO-WATERMARK] Embedding watermark (VAD: ${this.audioWatermarkSystem.vadEnabled ? 'ON' : 'OFF'})`);
+                }
+            }
+
+            // Применяем ducking если обнаружен наш watermark в возвращающемся звуке
+            if (this.audioWatermarkSystem.duckingEnabled) {
+                const shouldDuck = this.audioWatermarkSystem.detectOwnWatermark(finalLeft);
+                
+                if (shouldDuck !== this.audioWatermarkSystem.isDucking) {
+                    this.audioWatermarkSystem.isDucking = shouldDuck;
+                    log.info(`[AUDIO-DUCKING] ${shouldDuck ? '🔇 Activating' : '🔊 Deactivating'} ducking`);
+                    
+                    // Уведомляем Jitsi окно об изменении состояния ducking
+                    if (this.state.window && !this.state.window.isDestroyed()) {
+                        this.state.window.webContents.executeJavaScript(`
+                            (function() {
+                                window.systemAudioDucking = ${shouldDuck};
+                                console.log('[AUDIO-DUCKING] System ducking state:', window.systemAudioDucking);
+                                
+                                // Немедленно применяем изменение
+                                if (window.incomingAudioDucking) {
+                                    window.incomingAudioDucking.updateDucking(window.systemAudioDucking);
+                                }
+                            })();
+                        `).catch(() => {});
+                    }
+                }
+                
+                if (shouldDuck) {
+                    // Применяем плавное приглушение к системному звуку
+                    finalLeft = this.audioWatermarkSystem.applyDucking(finalLeft);
+                    finalRight = this.audioWatermarkSystem.applyDucking(finalRight);
+                }
+            }
+            
             // Отправляем в Jitsi
-            this.sendAudioToJitsi(processedLeft, processedRight, samples);
+            this.sendAudioToJitsi(finalLeft, finalRight, samples);
+            
         } catch (error: any) {
             log.error(`[AUDIO] processNativeAudio ERROR: ${error.message}`);
+        }
+    }
+
+    // Добавляем новые методы и свойства в класс JitsiManager:
+
+    private audioWatermarkSystem = {
+        initialized: false,
+        userId: null as string | null,
+        localMicActive: false,
+        localMicLevel: 0,
+        duckingEnabled: true,
+        isDucking: false,
+        duckingLevel: 0.15, // Приглушаем до 15%
+        fadeFrames: 48, // ~1ms для плавного перехода при 48kHz
+        
+        // VAD параметры
+        vadEnabled: true,
+        speechEnergyThreshold: 0.01,  // Минимальная энергия для речи
+        noiseFloor: 0.001,           // Уровень фонового шума
+        speechFrameCount: 0,          // Счетчик фреймов с речью
+        silenceFrameCount: 0,         // Счетчик фреймов тишины
+        isSpeaking: false,            // Текущее состояние речи
+        speechStartFrames: 3,         // Фреймов для начала речи
+        speechEndFrames: 15,          // Фреймов тишины для окончания речи
+        lastEnergyValues: [] as number[], // История энергии для адаптации
+        
+        // VAD - определение речевой активности
+        detectSpeech(audioData: Float32Array): boolean {
+            // 1. Вычисляем RMS энергию
+            let energy = 0;
+            for (let i = 0; i < audioData.length; i++) {
+                energy += audioData[i] * audioData[i];
+            }
+            energy = Math.sqrt(energy / audioData.length);
+            
+            // 2. Адаптивный порог на основе истории
+            this.lastEnergyValues.push(energy);
+            if (this.lastEnergyValues.length > 50) {
+                this.lastEnergyValues.shift();
+            }
+            
+            // Вычисляем средний уровень шума
+            if (this.lastEnergyValues.length > 10) {
+                const sortedEnergy = [...this.lastEnergyValues].sort((a, b) => a - b);
+                const percentile20 = sortedEnergy[Math.floor(sortedEnergy.length * 0.2)];
+                this.noiseFloor = Math.max(0.001, percentile20 * 1.5);
+            }
+            
+            // 3. Считаем переходы через ноль (ZCR)
+            let zeroCrossings = 0;
+            let previousSample = 0;
+            
+            for (let i = 0; i < audioData.length; i++) {
+                if (previousSample >= 0 && audioData[i] < 0) {
+                    zeroCrossings++;
+                } else if (previousSample < 0 && audioData[i] >= 0) {
+                    zeroCrossings++;
+                }
+                previousSample = audioData[i];
+            }
+            
+            const zcRate = zeroCrossings / audioData.length;
+            
+            // 4. Спектральный анализ для определения речевых частот
+            let midFreqEnergy = 0;
+            // Простая оценка средних частот (300-3400 Гц - речевой диапазон)
+            // Используем простой метод без FFT
+            for (let i = 1; i < audioData.length - 1; i++) {
+                const diff = Math.abs(audioData[i] - audioData[i-1]);
+                midFreqEnergy += diff;
+            }
+            midFreqEnergy /= audioData.length;
+            
+            // 5. Принятие решения
+            const hasEnergy = energy > Math.max(this.speechEnergyThreshold, this.noiseFloor * 2);
+            const hasVoiceZCR = zcRate > 0.01 && zcRate < 0.15; // Типично для речи
+            const hasMidFreq = midFreqEnergy > 0.005;
+            
+            // Для отладки
+            if (this.speechFrameCount === 0 && hasEnergy) {
+                console.log('[VAD] Potential speech:', {
+                    energy: energy.toFixed(4),
+                    noiseFloor: this.noiseFloor.toFixed(4),
+                    zcRate: zcRate.toFixed(4),
+                    midFreq: midFreqEnergy.toFixed(4)
+                });
+            }
+            
+            return hasEnergy && (hasVoiceZCR || hasMidFreq);
+        },
+        
+        // Обновление состояния речи с гистерезисом
+        updateSpeechState(audioData: Float32Array): void {
+            const speechDetected = this.detectSpeech(audioData);
+            
+            if (speechDetected) {
+                this.speechFrameCount++;
+                this.silenceFrameCount = 0;
+                
+                // Начинаем речь после N последовательных фреймов
+                if (this.speechFrameCount >= this.speechStartFrames && !this.isSpeaking) {
+                    this.isSpeaking = true;
+                    console.log('[VAD] ▶️ Speech STARTED');
+                }
+            } else {
+                this.silenceFrameCount++;
+                this.speechFrameCount = Math.max(0, this.speechFrameCount - 1); // Плавное снижение
+                
+                // Останавливаем речь после N фреймов тишины
+                if (this.silenceFrameCount >= this.speechEndFrames && this.isSpeaking) {
+                    this.isSpeaking = false;
+                    console.log('[VAD] ⏸️ Speech ENDED');
+                }
+            }
+        },
+        
+        // Генерация уникального паттерна watermark
+        generatePattern(userId: string): Float32Array {
+            let hash = 0;
+            for (let i = 0; i < userId.length; i++) {
+                hash = ((hash << 5) - hash) + userId.charCodeAt(i);
+                hash = hash & hash;
+            }
+            
+            // Ультразвуковой сигнал 18-19 кГц
+            const freq = 18000 + (Math.abs(hash) % 1000);
+            const pattern = new Float32Array(96); // 2ms при 48kHz
+            
+            for (let i = 0; i < pattern.length; i++) {
+                // Огибающая для плавности
+                const envelope = Math.sin(Math.PI * i / pattern.length);
+                pattern[i] = Math.sin(2 * Math.PI * freq * i / 48000) * 0.0003 * envelope;
+            }
+            
+            return pattern;
+        },
+        
+        // Встраивание watermark в аудио
+        embedWatermark(audioData: Float32Array, userId: string): Float32Array {
+            const pattern = this.generatePattern(userId);
+            const output = new Float32Array(audioData.length);
+            output.set(audioData);
+            
+            // Добавляем паттерн в начало и конец
+            for (let i = 0; i < pattern.length && i < output.length; i++) {
+                output[i] += pattern[i];
+            }
+            
+            // Также в конец для надежности
+            const endStart = Math.max(0, output.length - pattern.length);
+            for (let i = 0; i < pattern.length && endStart + i < output.length; i++) {
+                output[endStart + i] += pattern[i];
+            }
+            
+            return output;
+        },
+        
+        // Обнаружение своего watermark
+        detectOwnWatermark(audioData: Float32Array): boolean {
+            if (!this.userId) return false;
+            
+            const pattern = this.generatePattern(this.userId);
+            
+            // Проверяем начало и конец
+            const checkRanges = [
+                { start: 0, end: Math.min(pattern.length, audioData.length) },
+                { start: Math.max(0, audioData.length - pattern.length), end: audioData.length }
+            ];
+            
+            for (const range of checkRanges) {
+                let correlation = 0;
+                let signalPower = 0;
+                let patternPower = 0;
+                
+                const length = range.end - range.start;
+                for (let i = 0; i < length && i < pattern.length; i++) {
+                    const signalIdx = range.start + i;
+                    correlation += audioData[signalIdx] * pattern[i];
+                    signalPower += audioData[signalIdx] * audioData[signalIdx];
+                    patternPower += pattern[i] * pattern[i];
+                }
+                
+                if (signalPower < 0.00001 || patternPower < 0.00001) continue;
+                
+                const normalizedCorrelation = correlation / (Math.sqrt(signalPower) * Math.sqrt(patternPower));
+                
+                if (normalizedCorrelation > 0.5) { // Порог обнаружения
+                    return true;
+                }
+            }
+            
+            return false;
+        },
+        
+        // Применение ducking с плавным переходом
+        applyDucking(audioData: Float32Array): Float32Array {
+            const output = new Float32Array(audioData.length);
+            const fadeFrames = Math.min(this.fadeFrames, Math.floor(audioData.length / 4));
+            
+            for (let i = 0; i < audioData.length; i++) {
+                let gain = this.duckingLevel;
+                
+                // Плавный переход в начале
+                if (i < fadeFrames) {
+                    const fadeProgress = i / fadeFrames;
+                    gain = 1.0 - (1.0 - this.duckingLevel) * fadeProgress;
+                }
+                // Плавный переход в конце
+                else if (i >= audioData.length - fadeFrames) {
+                    const fadeProgress = (i - (audioData.length - fadeFrames)) / fadeFrames;
+                    gain = this.duckingLevel + (1.0 - this.duckingLevel) * fadeProgress;
+                }
+                
+                output[i] = audioData[i] * gain;
+            }
+            
+            return output;
+        },
+        
+        // Сброс VAD состояния
+        resetVAD(): void {
+            this.speechFrameCount = 0;
+            this.silenceFrameCount = 0;
+            this.isSpeaking = false;
+            this.lastEnergyValues = [];
+            console.log('[VAD] Reset');
+        }
+    };
+
+    // Метод инициализации системы watermark
+    private initializeWatermarkSystem(): void {
+        if (this.audioWatermarkSystem.initialized) return;
+        
+        log.info("[AUDIO-WATERMARK] Initializing watermark system");
+        
+        // Получаем userId из Jitsi
+        if (this.state.window && !this.state.window.isDestroyed()) {
+            this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    if (window.APP?.conference?._room) {
+                        return window.APP.conference._room.myUserId();
+                    }
+                    return null;
+                })();
+            `).then(userId => {
+                if (userId) {
+                    this.audioWatermarkSystem.userId = userId;
+                    this.audioWatermarkSystem.initialized = true;
+                    log.info(`[AUDIO-WATERMARK] System initialized with userId: ${userId}`);
+                }
+            }).catch(error => {
+                log.error(`[AUDIO-WATERMARK] Failed to get userId: ${error}`);
+            });
         }
     }
 
