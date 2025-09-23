@@ -13,7 +13,6 @@
 #include <memory>
 #include <dwmapi.h>
 #include <psapi.h>
-#include "audio_format.h" 
 #include <algorithm>
 #include <string>
 #include <chrono>
@@ -25,18 +24,54 @@
 #include <ksmedia.h>
 #include <functiondiscoverykeys_devpkey.h>
 
-// НОВЫЕ ВКЛЮЧЕНИЯ ДЛЯ PROCESS LOOPBACK
-#include <audioclientactivationparams.h>
-#include <Unknwn.h>
-
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "psapi.lib")
 
-// Константа для Process Loopback
+// ============================================================================
+// ОПРЕДЕЛЕНИЯ ДЛЯ PROCESS LOOPBACK API (если SDK не доступен)
+// ============================================================================
+#ifndef VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK
 #define VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK L"VAD\\Process_Loopback"
+#endif
+
+// Проверяем доступность Windows 11 SDK
+#ifdef __has_include
+  #if __has_include(<audioclientactivationparams.h>)
+    #define HAS_PROCESS_LOOPBACK_SDK 1
+    #include <audioclientactivationparams.h>
+  #endif
+#endif
+
+// Если SDK недоступен, определяем структуры вручную
+#ifndef HAS_PROCESS_LOOPBACK_SDK
+
+// Определяем недостающие типы и константы
+typedef enum _AUDIOCLIENT_ACTIVATION_TYPE {
+    AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT = 0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
+} AUDIOCLIENT_ACTIVATION_TYPE;
+
+typedef enum _PROCESS_LOOPBACK_MODE {
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE = 1
+} PROCESS_LOOPBACK_MODE;
+
+typedef struct AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+    DWORD TargetProcessId;
+    PROCESS_LOOPBACK_MODE ProcessLoopbackMode;
+} AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS;
+
+typedef struct AUDIOCLIENT_ACTIVATION_PARAMS {
+    AUDIOCLIENT_ACTIVATION_TYPE ActivationType;
+    union {
+        AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS ProcessLoopbackParams;
+    } DUMMYUNIONNAME;
+} AUDIOCLIENT_ACTIVATION_PARAMS;
+
+#endif // !HAS_PROCESS_LOOPBACK_SDK
 
 // Определение DWMWA_CLOAKED если его нет
 #ifndef DWMWA_CLOAKED
@@ -73,6 +108,9 @@ static std::atomic<bool> g_capture_active{false};
 // Глобальная переменная для управления громкостью
 static std::atomic<float> g_participants_volume{0.20f};
 static std::mutex g_volume_mutex;
+
+// Флаг доступности Process Loopback
+static std::atomic<bool> g_process_loopback_available{false};
 
 // Структуры для передачи данных
 struct VideoFrameData {
@@ -158,7 +196,7 @@ struct SimpleSyncManager {
 static SimpleSyncManager g_syncManager;
 
 // ============================================================================
-// КЛАСС ДЛЯ АСИНХРОННОЙ АКТИВАЦИИ PROCESS LOOPBACK
+// КЛАСС ДЛЯ АСИНХРОННОЙ АКТИВАЦИИ (если доступен API)
 // ============================================================================
 class ProcessLoopbackActivationHandler : public IActivateAudioInterfaceCompletionHandler {
 private:
@@ -225,6 +263,31 @@ public:
         return activationResult;
     }
 };
+
+// ============================================================================
+// ПРОВЕРКА ДОСТУПНОСТИ PROCESS LOOPBACK API
+// ============================================================================
+bool CheckProcessLoopbackSupport() {
+    // Проверяем версию Windows
+    OSVERSIONINFOEXW osvi = { sizeof(osvi), 0, 0, 0, 0, {0}, 0, 0 };
+    DWORDLONG const dwlConditionMask = VerSetConditionMask(
+        VerSetConditionMask(
+            VerSetConditionMask(0, VER_MAJORVERSION, VER_GREATER_EQUAL),
+            VER_MINORVERSION, VER_GREATER_EQUAL),
+        VER_BUILDNUMBER, VER_GREATER_EQUAL);
+    
+    osvi.dwMajorVersion = 10;
+    osvi.dwMinorVersion = 0;
+    osvi.dwBuildNumber = 20348; // Минимальная версия для Process Loopback
+    
+    if (VerifyVersionInfoW(&osvi, VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER, dwlConditionMask)) {
+        OutputDebugStringA("Process Loopback API potentially available (Windows version check passed)\n");
+        return true;
+    }
+    
+    OutputDebugStringA("Process Loopback API not available (Windows version too old)\n");
+    return false;
+}
 
 // Класс для управления громкостью других приложений
 class VolumeController {
@@ -598,7 +661,7 @@ public:
 };
 
 // ============================================================================
-// ОБНОВЛЕННЫЙ КЛАСС ДЛЯ ЗАХВАТА ЗВУКА С PROCESS LOOPBACK
+// КЛАСС ДЛЯ ЗАХВАТА ЗВУКА
 // ============================================================================
 class ApplicationAudioCapture {
 private:
@@ -618,7 +681,117 @@ private:
     bool excludeMode = false;
     
 public:
-    // НОВЫЙ МЕТОД: Захват звука конкретного приложения через Process Loopback
+    // Попытка использовать Process Loopback API (если доступен)
+    bool TryProcessLoopback(DWORD processId, bool exclude) {
+        if (!g_process_loopback_available) {
+            OutputDebugStringA("Process Loopback not available, skipping\n");
+            return false;
+        }
+        
+        // Проверяем, что у нас есть функция ActivateAudioInterfaceAsync
+        HMODULE mmdevapi = GetModuleHandleW(L"mmdevapi.dll");
+        if (!mmdevapi) {
+            mmdevapi = LoadLibraryW(L"mmdevapi.dll");
+        }
+        
+        if (!mmdevapi) {
+            OutputDebugStringA("Cannot load mmdevapi.dll\n");
+            return false;
+        }
+        
+        typedef HRESULT (WINAPI *ActivateAudioInterfaceAsyncFunc)(
+            LPCWSTR deviceInterfacePath,
+            REFIID riid,
+            PROPVARIANT *activationParams,
+            IActivateAudioInterfaceCompletionHandler *completionHandler,
+            IActivateAudioInterfaceAsyncOperation **activationOperation
+        );
+        
+        auto ActivateAudioInterfaceAsync = (ActivateAudioInterfaceAsyncFunc)GetProcAddress(
+            mmdevapi, "ActivateAudioInterfaceAsync");
+        
+        if (!ActivateAudioInterfaceAsync) {
+            OutputDebugStringA("ActivateAudioInterfaceAsync not found\n");
+            return false;
+        }
+        
+        // Создаем PROPVARIANT с параметрами активации
+        PROPVARIANT activateParams;
+        PropVariantInit(&activateParams);
+        
+        // Создаем структуру параметров
+        AUDIOCLIENT_ACTIVATION_PARAMS params = {};
+        params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+        params.ProcessLoopbackParams.TargetProcessId = processId;
+        params.ProcessLoopbackParams.ProcessLoopbackMode = exclude ? 
+            PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE :
+            PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+        
+        // Упаковываем в PROPVARIANT
+        activateParams.vt = VT_BLOB;
+        activateParams.blob.cbSize = sizeof(params);
+        activateParams.blob.pBlobData = (BYTE*)&params;
+        
+        // Создаем обработчик
+        ProcessLoopbackActivationHandler* handler = new ProcessLoopbackActivationHandler(&audioClient);
+        IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
+        
+        // Вызываем активацию
+        HRESULT hr = ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            __uuidof(IAudioClient),
+            &activateParams,
+            handler,
+            &asyncOp
+        );
+        
+        if (SUCCEEDED(hr)) {
+            hr = handler->Wait(5000);
+            
+            if (SUCCEEDED(hr) && audioClient) {
+                // Используем фиксированный формат
+                waveFormat = (WAVEFORMATEX*)CoTaskMemAlloc(sizeof(WAVEFORMATEX));
+                waveFormat->wFormatTag = WAVE_FORMAT_PCM;
+                waveFormat->nChannels = 2;
+                waveFormat->nSamplesPerSec = 44100;
+                waveFormat->wBitsPerSample = 16;
+                waveFormat->nBlockAlign = (waveFormat->nChannels * waveFormat->wBitsPerSample) / 8;
+                waveFormat->nAvgBytesPerSec = waveFormat->nSamplesPerSec * waveFormat->nBlockAlign;
+                waveFormat->cbSize = 0;
+                
+                hr = audioClient->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    0,  // Без LOOPBACK флага
+                    20000000,
+                    0,
+                    waveFormat,
+                    nullptr
+                );
+                
+                if (SUCCEEDED(hr)) {
+                    hr = audioClient->GetService(
+                        __uuidof(IAudioCaptureClient),
+                        (void**)&captureClient
+                    );
+                    
+                    if (SUCCEEDED(hr)) {
+                        useProcessLoopback = true;
+                        excludeMode = exclude;
+                        OutputDebugStringA("Process Loopback initialized successfully!\n");
+                    }
+                }
+            }
+        }
+        
+        handler->Release();
+        if (asyncOp) asyncOp->Release();
+        
+        PropVariantClear(&activateParams);
+        
+        return SUCCEEDED(hr) && audioClient != nullptr;
+    }
+    
+    // Захват звука конкретного приложения
     bool InitializeForApplication(HWND hwnd) {
         CoInitialize(nullptr);
         
@@ -640,157 +813,40 @@ public:
         }
         
         char log[256];
-        sprintf_s(log, "Initializing Process Loopback for PID: %lu\n", targetProcessId);
+        sprintf_s(log, "Initializing audio capture for PID: %lu\n", targetProcessId);
         OutputDebugStringA(log);
         
-        // Настройка параметров для Process Loopback
-        AUDIOCLIENT_ACTIVATION_PARAMS activationParams = {};
-        activationParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-        activationParams.ProcessLoopbackParams.TargetProcessId = targetProcessId;
-        activationParams.ProcessLoopbackParams.ProcessLoopbackMode = 
-            PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
-        
-        // Создаем обработчик для асинхронной активации
-        ProcessLoopbackActivationHandler* handler = new ProcessLoopbackActivationHandler(&audioClient);
-        IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-        
-        // Запускаем асинхронную активацию
-        HRESULT hr = ActivateAudioInterfaceAsync(
-            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-            __uuidof(IAudioClient),
-            &activationParams,
-            handler,
-            &asyncOp
-        );
-        
-        if (SUCCEEDED(hr)) {
-            // Ждем завершения активации
-            hr = handler->Wait(5000);
-            
-            if (SUCCEEDED(hr) && audioClient) {
-                // Используем фиксированный формат для Process Loopback
-                waveFormat = (WAVEFORMATEX*)CoTaskMemAlloc(sizeof(WAVEFORMATEX));
-                waveFormat->wFormatTag = WAVE_FORMAT_PCM;
-                waveFormat->nChannels = 2;
-                waveFormat->nSamplesPerSec = 44100;
-                waveFormat->wBitsPerSample = 16;
-                waveFormat->nBlockAlign = (waveFormat->nChannels * waveFormat->wBitsPerSample) / 8;
-                waveFormat->nAvgBytesPerSec = waveFormat->nSamplesPerSec * waveFormat->nBlockAlign;
-                waveFormat->cbSize = 0;
-                
-                // Инициализация без флага LOOPBACK
-                hr = audioClient->Initialize(
-                    AUDCLNT_SHAREMODE_SHARED,
-                    0,  // Без AUDCLNT_STREAMFLAGS_LOOPBACK!
-                    20000000,
-                    0,
-                    waveFormat,
-                    nullptr
-                );
-                
-                if (SUCCEEDED(hr)) {
-                    hr = audioClient->GetService(
-                        __uuidof(IAudioCaptureClient),
-                        (void**)&captureClient
-                    );
-                    
-                    if (SUCCEEDED(hr)) {
-                        useProcessLoopback = true;
-                        OutputDebugStringA("Process Loopback initialized successfully\n");
-                    }
-                }
-            }
+        // Сначала пробуем Process Loopback (если доступен)
+        if (TryProcessLoopback(targetProcessId, false)) {
+            return true;
         }
         
-        handler->Release();
-        if (asyncOp) asyncOp->Release();
-        
-        // Если Process Loopback не удался, пробуем обычный системный захват
-        if (FAILED(hr) || !audioClient) {
-            OutputDebugStringA("Process Loopback failed, falling back to system audio\n");
-            return InitializeForSystemAudio();
-        }
-        
-        return SUCCEEDED(hr);
+        // Если Process Loopback не удался, используем обычный системный захват
+        OutputDebugStringA("Falling back to system audio capture\n");
+        return InitializeForSystemAudio();
     }
     
-    // НОВЫЙ МЕТОД: Захват всего звука КРОМЕ текущего процесса
+    // Захват всего звука КРОМЕ текущего процесса
     bool InitializeExcludingCurrentProcess() {
         CoInitialize(nullptr);
         
         DWORD currentProcessId = GetCurrentProcessId();
         
         char log[256];
-        sprintf_s(log, "Initializing Process Loopback EXCLUDING PID: %lu\n", currentProcessId);
+        sprintf_s(log, "Initializing audio capture EXCLUDING PID: %lu\n", currentProcessId);
         OutputDebugStringA(log);
         
-        // Настройка параметров для исключения текущего процесса
-        AUDIOCLIENT_ACTIVATION_PARAMS activationParams = {};
-        activationParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-        activationParams.ProcessLoopbackParams.TargetProcessId = currentProcessId;
-        activationParams.ProcessLoopbackParams.ProcessLoopbackMode = 
-            PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;  // ИСКЛЮЧАЕМ!
-        
-        ProcessLoopbackActivationHandler* handler = new ProcessLoopbackActivationHandler(&audioClient);
-        IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-        
-        HRESULT hr = ActivateAudioInterfaceAsync(
-            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-            __uuidof(IAudioClient),
-            &activationParams,
-            handler,
-            &asyncOp
-        );
-        
-        if (SUCCEEDED(hr)) {
-            hr = handler->Wait(5000);
-            
-            if (SUCCEEDED(hr) && audioClient) {
-                waveFormat = (WAVEFORMATEX*)CoTaskMemAlloc(sizeof(WAVEFORMATEX));
-                waveFormat->wFormatTag = WAVE_FORMAT_PCM;
-                waveFormat->nChannels = 2;
-                waveFormat->nSamplesPerSec = 44100;
-                waveFormat->wBitsPerSample = 16;
-                waveFormat->nBlockAlign = (waveFormat->nChannels * waveFormat->wBitsPerSample) / 8;
-                waveFormat->nAvgBytesPerSec = waveFormat->nSamplesPerSec * waveFormat->nBlockAlign;
-                waveFormat->cbSize = 0;
-                
-                hr = audioClient->Initialize(
-                    AUDCLNT_SHAREMODE_SHARED,
-                    0,
-                    20000000,
-                    0,
-                    waveFormat,
-                    nullptr
-                );
-                
-                if (SUCCEEDED(hr)) {
-                    hr = audioClient->GetService(
-                        __uuidof(IAudioCaptureClient),
-                        (void**)&captureClient
-                    );
-                    
-                    if (SUCCEEDED(hr)) {
-                        useProcessLoopback = true;
-                        excludeMode = true;
-                        OutputDebugStringA("Process Loopback (exclude mode) initialized successfully\n");
-                    }
-                }
-            }
+        // Пробуем Process Loopback в режиме исключения
+        if (TryProcessLoopback(currentProcessId, true)) {
+            return true;
         }
         
-        handler->Release();
-        if (asyncOp) asyncOp->Release();
-        
-        if (FAILED(hr) || !audioClient) {
-            OutputDebugStringA("Process Loopback (exclude) failed, falling back to system audio\n");
-            return InitializeForSystemAudio();
-        }
-        
-        return SUCCEEDED(hr);
+        // Fallback к обычному системному захвату
+        OutputDebugStringA("Falling back to system audio capture\n");
+        return InitializeForSystemAudio();
     }
     
-    // Обычный системный захват (fallback)
+    // Обычный системный захват
     bool InitializeForSystemAudio() {
         CoInitialize(nullptr);
         
@@ -1240,7 +1296,7 @@ napi_value SetCaptureQuality(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// ОБНОВЛЕННАЯ функция начала захвата
+// Начало захвата
 napi_value StartCapture(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
@@ -1252,6 +1308,13 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
         napi_value excludeVal;
         napi_get_named_property(env, argv[0], "excludeCurrentProcess", &excludeVal);
         napi_get_value_bool(env, excludeVal, &excludeCurrentProcess);
+    }
+    
+    // Проверяем поддержку Process Loopback при первом запуске
+    static bool firstRun = true;
+    if (firstRun) {
+        g_process_loopback_available = CheckProcessLoopbackSupport();
+        firstRun = false;
     }
     
     g_syncManager.Initialize();
@@ -1300,30 +1363,27 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     
     // Запуск аудио захвата
     if (g_currentSource.type == "window") {
-        // Захват аудио от конкретного окна/приложения
+        // Захват аудио от конкретного окна
         try {
             HWND hwnd = (HWND)std::stoull(g_currentSource.id);
             
             if (IsWindow(hwnd)) {
                 g_appAudioCapture = std::make_unique<ApplicationAudioCapture>();
                 
-                // Используем Process Loopback для конкретного приложения
                 if (g_appAudioCapture->InitializeForApplication(hwnd)) {
                     g_appAudioCapture->StartCapture();
                     audioStarted = true;
-                    OutputDebugStringA("Started application-specific audio capture with Process Loopback\n");
                 }
             }
         } catch (...) {
             OutputDebugStringA("Exception in window audio capture\n");
         }
     } else if (excludeCurrentProcess) {
-        // Захват всего звука КРОМЕ текущего процесса (Electron/Jitsi)
+        // Захват всего звука КРОМЕ текущего процесса
         g_appAudioCapture = std::make_unique<ApplicationAudioCapture>();
         if (g_appAudioCapture->InitializeExcludingCurrentProcess()) {
             g_appAudioCapture->StartCapture();
             audioStarted = true;
-            OutputDebugStringA("Started audio capture EXCLUDING current process\n");
         }
     } else {
         // Обычный системный захват
@@ -1331,7 +1391,6 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
         if (g_appAudioCapture->InitializeForSystemAudio()) {
             g_appAudioCapture->StartCapture();
             audioStarted = true;
-            OutputDebugStringA("Started system audio capture\n");
         }
     }
     
@@ -1344,10 +1403,16 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     napi_get_boolean(env, videoStarted || audioStarted, &success);
     napi_set_named_property(env, result, "success", success);
     
+    // Добавляем информацию о поддержке Process Loopback
+    napi_value processLoopbackAvailable;
+    napi_get_boolean(env, g_process_loopback_available.load(), &processLoopbackAvailable);
+    napi_set_named_property(env, result, "processLoopbackAvailable", processLoopbackAvailable);
+    
     napi_value message;
     std::string msg = "Started: ";
     if (videoStarted) msg += "video ";
     if (audioStarted) msg += "audio";
+    if (g_process_loopback_available) msg += " (Process Loopback available)";
     napi_create_string_utf8(env, msg.c_str(), NAPI_AUTO_LENGTH, &message);
     napi_set_named_property(env, result, "message", message);
     
@@ -1582,7 +1647,10 @@ napi_value GetParticipantsVolume(napi_env env, napi_callback_info info) {
 // Тестовый метод
 napi_value TestMethod(napi_env env, napi_callback_info info) {
     napi_value result;
-    napi_create_string_utf8(env, "Windows Native Module v2.0 - Process Loopback Audio Support", NAPI_AUTO_LENGTH, &result);
+    const char* message = g_process_loopback_available ? 
+        "Windows Native Module v2.0 - Process Loopback AVAILABLE" :
+        "Windows Native Module v2.0 - Process Loopback NOT AVAILABLE (using fallback)";
+    napi_create_string_utf8(env, message, NAPI_AUTO_LENGTH, &result);
     return result;
 }
 

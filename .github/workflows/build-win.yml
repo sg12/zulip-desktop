@@ -35,6 +35,35 @@ jobs:
       with:
         version-sdk: '22621'
         features: 'OptionId.DesktopCPPx64'
+
+    - name: Check Windows SDK and headers
+      run: |
+        echo "=== Checking Windows SDK ==="
+        $sdkPath = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+        if (Test-Path $sdkPath) {
+          echo "✓ Windows SDK found at: $sdkPath"
+          $versions = Get-ChildItem $sdkPath -Directory | Sort-Object Name -Descending
+          echo "Available SDK versions:"
+          $versions | ForEach-Object { echo "  - $($_.Name)" }
+          
+          # Check for audioclientactivationparams.h
+          $headerFound = $false
+          foreach ($version in $versions) {
+            $headerPath = "$($version.FullName)\um\audioclientactivationparams.h"
+            if (Test-Path $headerPath) {
+              echo "✓ Found audioclientactivationparams.h in SDK $($version.Name)"
+              $headerFound = $true
+              break
+            }
+          }
+          
+          if (-not $headerFound) {
+            echo "⚠ audioclientactivationparams.h not found - will use fallback"
+          }
+        } else {
+          echo "⚠ Windows SDK not found at expected location"
+        }
+      shell: pwsh
         
     - name: Install node-gyp globally
       run: npm install -g node-gyp
