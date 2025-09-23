@@ -31,7 +31,8 @@
           "-lpsapi.lib",
           "-lwinmm.lib",
           "-lmmdevapi.lib",
-          "-lpropsys.lib"
+          "-lpropsys.lib",
+          "-lVersion.lib"  # Добавляем для VerifyVersionInfo
         ],
         "msvs_settings": {
           "VCCLCompilerTool": {

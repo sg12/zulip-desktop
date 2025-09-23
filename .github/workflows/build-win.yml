@@ -120,7 +120,12 @@ jobs:
         
     - name: Configure build
       working-directory: native-addon/win
-      run: node-gyp configure --verbose
+      run: |
+        # Добавляем пути к SDK в переменные окружения
+        $env:INCLUDE = "${env:INCLUDE};C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um"
+        $env:INCLUDE = "${env:INCLUDE};C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\um"
+        node-gyp configure --verbose
+      shell: pwsh
         
     - name: Build native module
       working-directory: native-addon/win

@@ -31,24 +31,16 @@
 #pragma comment(lib, "psapi.lib")
 
 // ============================================================================
-// ОПРЕДЕЛЕНИЯ ДЛЯ PROCESS LOOPBACK API (если SDK не доступен)
+// ОПРЕДЕЛЕНИЯ ДЛЯ PROCESS LOOPBACK API
 // ============================================================================
 #ifndef VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK
 #define VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK L"VAD\\Process_Loopback"
 #endif
 
-// Проверяем доступность Windows 11 SDK
-#ifdef __has_include
-  #if __has_include(<audioclientactivationparams.h>)
-    #define HAS_PROCESS_LOOPBACK_SDK 1
-    #include <audioclientactivationparams.h>
-  #endif
-#endif
+// Всегда определяем структуры для Process Loopback API
+// Это гарантирует совместимость на любой системе сборки
+#ifndef AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
 
-// Если SDK недоступен, определяем структуры вручную
-#ifndef HAS_PROCESS_LOOPBACK_SDK
-
-// Определяем недостающие типы и константы
 typedef enum _AUDIOCLIENT_ACTIVATION_TYPE {
     AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT = 0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
@@ -71,7 +63,7 @@ typedef struct AUDIOCLIENT_ACTIVATION_PARAMS {
     } DUMMYUNIONNAME;
 } AUDIOCLIENT_ACTIVATION_PARAMS;
 
-#endif // !HAS_PROCESS_LOOPBACK_SDK
+#endif // !AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
 
 // Определение DWMWA_CLOAKED если его нет
 #ifndef DWMWA_CLOAKED
