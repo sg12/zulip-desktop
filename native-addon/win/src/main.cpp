@@ -1294,12 +1294,22 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     napi_value argv[1];
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     
-    // Проверяем параметры
-    bool excludeCurrentProcess = false;
+    // ИЗМЕНЕНИЕ: excludeCurrentProcess теперь TRUE по умолчанию
+    bool excludeCurrentProcess = true;  // ← БЫЛО false, СТАЛО true
+    
     if (argc >= 1) {
         napi_value excludeVal;
         napi_get_named_property(env, argv[0], "excludeCurrentProcess", &excludeVal);
-        napi_get_value_bool(env, excludeVal, &excludeCurrentProcess);
+        
+        // Проверяем, был ли явно передан параметр
+        napi_valuetype valueType;
+        napi_typeof(env, excludeVal, &valueType);
+        
+        // Если параметр передан явно - используем его значение
+        if (valueType == napi_boolean) {
+            napi_get_value_bool(env, excludeVal, &excludeCurrentProcess);
+        }
+        // Иначе оставляем true по умолчанию
     }
     
     // Проверяем поддержку Process Loopback при первом запуске
@@ -1308,6 +1318,15 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
         g_process_loopback_available = CheckProcessLoopbackSupport();
         firstRun = false;
     }
+    
+    // Логирование режима захвата
+    char modeLog[256];
+    if (excludeCurrentProcess) {
+        sprintf_s(modeLog, "Starting capture with EXCLUDE mode (echo cancellation enabled by default)\n");
+    } else {
+        sprintf_s(modeLog, "Starting capture with INCLUDE mode (all system audio)\n");
+    }
+    OutputDebugStringA(modeLog);
     
     g_syncManager.Initialize();
     g_syncManager.Reset();
