@@ -4,6 +4,8 @@ import * as path from "path";
 import log from "electron-log";
 import { NativeCaptureManager } from "./native-capture";
 import { JitsiScreenShareMonitor } from "./jitsi-screen-share-monitor";
+const DTLNProcessor = require(path.join(__dirname, '../lib/dtln-aec/dtln-tflite-processor'));
+const AudioProcessor = require(path.join(__dirname, '../lib/dtln-aec/audio-processor'));
 
 interface JitsiOptions {
   roomName: string;
@@ -291,6 +293,10 @@ export class JitsiManager {
     private debugMonitoringStarted: boolean = false;
     private debugMonitoringInterval?: NodeJS.Timer;
 
+    private aecProcessor: any; // DTLN-AEC процессор
+    private aecEnabled: boolean = true;
+    private aecStats: any = {};
+
     constructor(
         nativeCapture: NativeCaptureManager,
         bundlePath: string,
@@ -324,6 +330,22 @@ export class JitsiManager {
          this.debugMonitoringStarted = false;
 
         log.info("[JITSI-MANAGER] Debug UI enabled:", this.config.enableDebugUI);
+        this.initializeAEC();
+    }
+
+    private async initializeAEC(): Promise<void> {
+        try {
+            this.aecProcessor = new DTLNProcessor();
+            await this.aecProcessor.initialize(256); // 256 - размер модели
+            
+            const stats = this.aecProcessor.getStats();
+            log.info("[AEC] Initialized:", stats);
+            
+            this.aecEnabled = true;
+        } catch (error: any) {
+            log.error("[AEC] Initialization failed:", error);
+            this.aecEnabled = false;
+        }
     }
 
     private simpleDuckingSystem = {
@@ -3570,7 +3592,8 @@ export class JitsiManager {
     private processNativeAudio(audioData: any): void {
         if (!this.state.window || this.state.window.isDestroyed()) return;
         
-        this.state.audioFrameCount++;
+        if(this.state.audioFrameCount)
+            this.state.audioFrameCount++;
         
         try {
             const arrayBuffer = audioData.data;
@@ -3584,107 +3607,201 @@ export class JitsiManager {
                 ? this.decodeWindowsAudio(arrayBuffer, samples, channels)
                 : this.decodeMacOSAudio(arrayBuffer, samples, channels);
             
-            // Анализируем уровни
-            const levels = this.analyzeAudioLevels(leftChannel, rightChannel);
-            
-            // Нормализуем
-            const { processedLeft, processedRight } = this.normalizeAudio(
-                leftChannel, 
-                rightChannel, 
-                levels
-            );
-
-            // УПРОЩЕННОЕ ОПРЕДЕЛЕНИЕ АКТИВНОСТИ МИКРОФОНА
-            // Просто проверяем уровень входящего аудио от микрофона
-            const micActive = levels.maxLeft > 0.02 || levels.maxRight > 0.02;
-            
-            if (micActive) {
-                this.simpleDuckingSystem.activityCounter++;
-                this.simpleDuckingSystem.silenceCounter = 0;
+            // Применяем AEC синхронно или с callback
+            if (this.aecEnabled && this.aecProcessor) {
+                // Конвертируем стерео в моно для AEC
+                const monoInput = this.stereoToMono(leftChannel, rightChannel);
                 
-                if (this.simpleDuckingSystem.activityCounter >= this.simpleDuckingSystem.activityThreshold) {
-                    if (!this.simpleDuckingSystem.isLocalMicActive) {
-                        this.simpleDuckingSystem.isLocalMicActive = true;
-                        this.simpleDuckingSystem.lastMicActivityTime = Date.now();
-                        log.info("[DUCKING] 🎤 Mic activity detected - will activate ducking");
-                    }
-                }
-            } else {
-                this.simpleDuckingSystem.silenceCounter++;
-                this.simpleDuckingSystem.activityCounter = 0;
-                
-                if (this.simpleDuckingSystem.silenceCounter >= this.simpleDuckingSystem.silenceThreshold) {
-                    if (this.simpleDuckingSystem.isLocalMicActive) {
-                        this.simpleDuckingSystem.isLocalMicActive = false;
-                        log.info("[DUCKING] 🔇 Mic inactive - will deactivate ducking");
-                    }
-                }
-            }
-            
-            // ПРИМЕНЯЕМ DUCKING С ЗАДЕРЖКОЙ
-            const now = Date.now();
-            const timeSinceMicActive = now - this.simpleDuckingSystem.lastMicActivityTime;
-            
-            // Активируем ducking через 500ms после начала речи
-            const shouldDuck = this.simpleDuckingSystem.isLocalMicActive && 
-                            timeSinceMicActive > this.simpleDuckingSystem.duckingDelay;
-            
-            // Деактивируем ducking через 500ms после окончания речи
-            const shouldKeepDucking = !this.simpleDuckingSystem.isLocalMicActive && 
-                                    timeSinceMicActive < (this.simpleDuckingSystem.duckingDelay + this.simpleDuckingSystem.releaseDelay);
-            
-            const duckingNeeded = shouldDuck || shouldKeepDucking;
-            
-            // Уведомляем Jitsi окно если состояние изменилось
-            if (duckingNeeded !== this.simpleDuckingSystem.duckingActive) {
-                this.simpleDuckingSystem.duckingActive = duckingNeeded;
-                log.info(`[DUCKING] ${duckingNeeded ? '🔇 ACTIVATED' : '🔊 DEACTIVATED'}`);
-                
-                if (this.state.window && !this.state.window.isDestroyed()) {
-                    this.state.window.webContents.executeJavaScript(`
-                        (function() {
-                            window.systemAudioDucking = ${duckingNeeded};
-                            console.log('[DUCKING] State changed to:', window.systemAudioDucking);
+                // Получаем эхо-референс асинхронно
+                this.getEchoReferenceFromJitsi().then(echoReference => {
+                    // Обрабатываем через AEC
+                    this.aecProcessor.processBlock(monoInput, echoReference)
+                        .then((processed: Float32Array) => {
+                            // Конвертируем обратно в стерео
+                            const stereo = this.monoToStereo(processed);
                             
-                            // Применяем к входящим трекам
-                            if (window.incomingAudioDucking) {
-                                window.incomingAudioDucking.updateDucking(window.systemAudioDucking);
-                            }
-                        })();
-                    `).catch(() => {});
-                }
+                            // Продолжаем обработку
+                            this.finalizeAudioProcessing(stereo.left, stereo.right, samples);
+                        })
+                        .catch((error: any) => {
+                            log.error("[AEC] Processing error:", error);
+                            // Fallback - используем оригинальное аудио
+                            this.finalizeAudioProcessing(leftChannel, rightChannel, samples);
+                        });
+                }).catch(() => {
+                    // Если не получили эхо-референс, обрабатываем без него
+                    this.aecProcessor.processBlock(monoInput, null)
+                        .then((processed: Float32Array) => {
+                            const stereo = this.monoToStereo(processed);
+                            this.finalizeAudioProcessing(stereo.left, stereo.right, samples);
+                        })
+                        .catch(() => {
+                            this.finalizeAudioProcessing(leftChannel, rightChannel, samples);
+                        });
+                });
+            } else {
+                // Без AEC - используем существующую логику
+                this.finalizeAudioProcessing(leftChannel, rightChannel, samples);
             }
-            
-            // Применяем ducking к системному звуку если нужно
-            let finalLeft = processedLeft;
-            let finalRight = processedRight;
-            
-            if (duckingNeeded) {
-                const duckingGain = this.simpleDuckingSystem.duckingLevel;
-                for (let i = 0; i < finalLeft.length; i++) {
-                    finalLeft[i] *= duckingGain;
-                    finalRight[i] *= duckingGain;
-                }
-            }
-            
-            // Микширование с голосами участников если нужно
-            if (this.state.window && !this.state.window.isDestroyed()) {
-                this.state.window.webContents.executeJavaScript(`
-                    (function() {
-                        if (window.participantAudioMixer && window.audioRoutingMode === 'presenter_mix') {
-                            const participantMix = window.participantAudioMixer.getMixedOutput();
-                            window.pendingParticipantAudio = participantMix;
-                        }
-                    })();
-                `).catch(() => {});
-            }
-            
-            // Отправляем в Jitsi
-            this.sendAudioToJitsi(finalLeft, finalRight, samples);
             
         } catch (error: any) {
             log.error(`[AUDIO] processNativeAudio ERROR: ${error.message}`);
         }
+    }
+
+    // Новый метод для финальной обработки аудио
+    private finalizeAudioProcessing(
+        leftChannel: Float32Array, 
+        rightChannel: Float32Array, 
+        samples: number
+    ): void {
+        // Анализируем уровни
+        const levels = this.analyzeAudioLevels(leftChannel, rightChannel);
+        
+        // Нормализуем
+        const { processedLeft, processedRight } = this.normalizeAudio(
+            leftChannel, 
+            rightChannel, 
+            levels
+        );
+        
+        // УПРОЩЕННОЕ ОПРЕДЕЛЕНИЕ АКТИВНОСТИ МИКРОФОНА (ваш существующий код)
+        const micActive = levels.maxLeft > 0.02 || levels.maxRight > 0.02;
+        
+        if (micActive) {
+            this.simpleDuckingSystem.activityCounter++;
+            this.simpleDuckingSystem.silenceCounter = 0;
+            
+            if (this.simpleDuckingSystem.activityCounter >= this.simpleDuckingSystem.activityThreshold) {
+                if (!this.simpleDuckingSystem.isLocalMicActive) {
+                    this.simpleDuckingSystem.isLocalMicActive = true;
+                    this.simpleDuckingSystem.lastMicActivityTime = Date.now();
+                    log.info("[DUCKING] 🎤 Mic activity detected - will activate ducking");
+                }
+            }
+        } else {
+            this.simpleDuckingSystem.silenceCounter++;
+            this.simpleDuckingSystem.activityCounter = 0;
+            
+            if (this.simpleDuckingSystem.silenceCounter >= this.simpleDuckingSystem.silenceThreshold) {
+                if (this.simpleDuckingSystem.isLocalMicActive) {
+                    this.simpleDuckingSystem.isLocalMicActive = false;
+                    log.info("[DUCKING] 🔇 Mic inactive - will deactivate ducking");
+                }
+            }
+        }
+        
+        // ПРИМЕНЯЕМ DUCKING С ЗАДЕРЖКОЙ
+        const now = Date.now();
+        const timeSinceMicActive = now - this.simpleDuckingSystem.lastMicActivityTime;
+        
+        const shouldDuck = this.simpleDuckingSystem.isLocalMicActive && 
+                        timeSinceMicActive > this.simpleDuckingSystem.duckingDelay;
+        
+        const shouldKeepDucking = !this.simpleDuckingSystem.isLocalMicActive && 
+                                timeSinceMicActive < (this.simpleDuckingSystem.duckingDelay + this.simpleDuckingSystem.releaseDelay);
+        
+        const duckingNeeded = shouldDuck || shouldKeepDucking;
+        
+        // Уведомляем Jitsi окно если состояние изменилось
+        if (duckingNeeded !== this.simpleDuckingSystem.duckingActive) {
+            this.simpleDuckingSystem.duckingActive = duckingNeeded;
+            log.info(`[DUCKING] ${duckingNeeded ? '🔇 ACTIVATED' : '🔊 DEACTIVATED'}`);
+            
+            if (this.state.window && !this.state.window.isDestroyed()) {
+                this.state.window.webContents.executeJavaScript(`
+                    (function() {
+                        window.systemAudioDucking = ${duckingNeeded};
+                        console.log('[DUCKING] State changed to:', window.systemAudioDucking);
+                        
+                        if (window.incomingAudioDucking) {
+                            window.incomingAudioDucking.updateDucking(window.systemAudioDucking);
+                        }
+                    })();
+                `).catch(() => {});
+            }
+        }
+        
+        // Применяем ducking к системному звуку если нужно
+        let finalLeft = processedLeft;
+        let finalRight = processedRight;
+        
+        if (duckingNeeded) {
+            const duckingGain = this.simpleDuckingSystem.duckingLevel;
+            for (let i = 0; i < finalLeft.length; i++) {
+                finalLeft[i] *= duckingGain;
+                finalRight[i] *= duckingGain;
+            }
+        }
+        
+        // Отправляем в Jitsi
+        this.sendAudioToJitsi(finalLeft, finalRight, samples);
+    }
+
+    // Новый метод для получения эхо-референса из Jitsi
+    private async getEchoReferenceFromJitsi(): Promise<Float32Array | null> {
+        if (!this.state.window || this.state.window.isDestroyed()) {
+            return null;
+        }
+        
+        try {
+            const result = await this.state.window.webContents.executeJavaScript(`
+                (function() {
+                    // Получаем аудио от удаленных участников
+                    if (window.APP?.conference?._room) {
+                        const remoteTracks = window.APP.conference._room.getRemoteTracks();
+                        const audioTracks = remoteTracks.filter(t => t.getType() === 'audio');
+                        
+                        if (audioTracks.length > 0) {
+                            // Здесь нужно захватить буфер от удаленных треков
+                            // Это упрощенный пример
+                            if (window.lastRemoteAudioBuffer) {
+                                return Array.from(window.lastRemoteAudioBuffer);
+                            }
+                        }
+                    }
+                    return null;
+                })();
+            `);
+            
+            if (result) {
+                return new Float32Array(result);
+            }
+            
+            return null;
+            
+        } catch (error) {
+            return null;
+        }
+    }
+    
+    // Вспомогательные методы для конвертации аудио
+    private stereoToMono(left: Float32Array, right: Float32Array): Float32Array {
+        const mono = new Float32Array(left.length);
+        for (let i = 0; i < left.length; i++) {
+            mono[i] = (left[i] + right[i]) / 2;
+        }
+        return mono;
+    }
+    
+    private monoToStereo(mono: Float32Array): { left: Float32Array, right: Float32Array } {
+        return {
+            left: new Float32Array(mono),
+            right: new Float32Array(mono)
+        };
+    }
+    
+    // Добавляем метод для включения/выключения AEC
+    async toggleAEC(enabled: boolean): Promise<void> {
+        this.aecEnabled = enabled;
+        
+        if (enabled && !this.aecProcessor) {
+            await this.initializeAEC();
+        } else if (!enabled && this.aecProcessor) {
+            this.aecProcessor.cleanup();
+        }
+        
+        log.info(`[AEC] ${enabled ? 'Enabled' : 'Disabled'}`);
     }
 
     private decodeWindowsAudio(
@@ -4953,6 +5070,10 @@ export class JitsiManager {
                     log.info("[STREAM-ELECTRON] Standard mode cleanup completed");
                     return;
                 }
+            }
+
+            if (this.aecProcessor) {
+                this.aecProcessor.cleanup();
             }
 
             // 1. Сначала "ядерная" очистка всех потоков
