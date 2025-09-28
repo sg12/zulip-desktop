@@ -41,7 +41,7 @@ import { ipcMain, send } from "./typed-ipc-main.js";
 const { setupScreenSharingMain } = require('@jitsi/electron-sdk');
 
 import { NativeCaptureManager } from './native-capture';
-import { JitsiManager } from './jitsi-manager';
+import { JitsiNativeManager } from './jitsi-native-manager';
 
 import * as fs from 'fs';
 import * as https from 'https';
@@ -378,15 +378,15 @@ async function createMainWindow(): Promise<BrowserWindow> {
   await app.whenReady();
 
   const nativeCaptureManager = new NativeCaptureManager();
-  const jitsiManager = new JitsiManager(
+  const jitsiManager = new JitsiNativeManager(  // Изменили тип
     nativeCaptureManager,
     bundlePath,
     iconPath(),
     {
-        videoQuality: 'MEDIUM',  // 720p для экономии ресурсов
-        useHybridMode: true,
-        enableDebugUI: true,
-        enablePerformanceMonitoring: true
+      videoQuality: 'MEDIUM',
+      enableDebugUI: true,
+      enablePerformanceMonitoring: true
+      // убрали useHybridMode - он больше не нужен
     }
   );
 
@@ -567,44 +567,43 @@ async function createMainWindow(): Promise<BrowserWindow> {
 
 
   ipcMain.handle("jitsi-connect-with-zulip-config", async (event, options) => {
-    log.info("🎯[Jitsi] Connecting with Zulip config...");
-    log.info(`🎯[Jitsi] Options received: ${JSON.stringify(options)}`);
+      log.info("🎯[Jitsi] Connecting with Zulip config...");
+      log.info(`🎯[Jitsi] Options received: ${JSON.stringify(options)}`);
 
-    try {
-        // Используем JitsiManager вместо createJitsiWindow
-        const result = await jitsiManager.createWindow({
-            roomName: options.roomName || '',
-            serverUrl: options.serverUrl || 'https://jitsi-connectrm.ru',
-            displayName: options.userInfo?.displayName || 'Guest',
-            email: options.userInfo?.email || '',
-            avatarUrl: options.userInfo?.avatarUrl || '',
-            jwt: options.jwt || '',
-            topic: options.topic || '',
-            stream: options.stream || ''
-        });
-        
-        if (result.success) {
-            log.info(`🎯[Jitsi] Conference window created successfully`);
-            
-            // Отправляем подтверждение обратно в Zulip
-            setTimeout(() => {
-                sendEventToZulip('jitsi-conference-ready', {
-                    success: true,
-                    roomName: options.roomName
-                });
-            }, 1000);
-        }
-        
-        return result;
-        
-    } catch (error: any) {
-        log.error(`🎯[Jitsi] Error: ${error.message}`);
-        return { 
-            success: false, 
-            error: error.message,
-            fallbackToBrowser: true
-        };
-    }
+      try {
+          // Код остается тем же - jitsiManager теперь JitsiNativeManager
+          const result = await jitsiManager.createWindow({
+              roomName: options.roomName || '',
+              serverUrl: options.serverUrl || 'https://jitsi-connectrm.ru',
+              displayName: options.userInfo?.displayName || 'Guest',
+              email: options.userInfo?.email || '',
+              avatarUrl: options.userInfo?.avatarUrl || '',
+              jwt: options.jwt || '',
+              topic: options.topic || '',
+              stream: options.stream || ''
+          });
+          
+          if (result.success) {
+              log.info(`🎯[Jitsi] Conference window created successfully`);
+              
+              setTimeout(() => {
+                  sendEventToZulip('jitsi-conference-ready', {
+                      success: true,
+                      roomName: options.roomName
+                  });
+              }, 1000);
+          }
+          
+          return result;
+          
+      } catch (error: any) {
+          log.error(`🎯[Jitsi] Error: ${error.message}`);
+          return { 
+              success: false, 
+              error: error.message,
+              fallbackToBrowser: true
+          };
+      }
   });
 
   // Обработчики событий от Jitsi окна
@@ -624,25 +623,28 @@ async function createMainWindow(): Promise<BrowserWindow> {
   });
 
   ipcMain.on('electron-bridge-event', async (event, data) => {
-    log.info(`Main: electron_bridge event: ${data.event}`);
-    
-    if (data.event === 'requestDesktopSources') {
-        try {
-            // Используем NativeCaptureManager
-            const sources = await nativeCaptureManager.getSources();
-            
-            log.info(`🔍 Got ${sources.length} sources`);
-            
-            // Отправляем в Jitsi окно если оно есть
-            const jitsiStatus = await jitsiManager.getStatus();
-            if (jitsiStatus.hasWindow) {
-                await jitsiManager.sendSourcesToWindow(sources);
-            }
-            
-        } catch (error: any) {
-            log.error(`🔍 Error: ${error.message}`);
-        }
-    }
+      log.info(`Main: electron_bridge event: ${data.event}`);
+      
+      if (data.event === 'requestDesktopSources') {
+          try {
+              const sources = await nativeCaptureManager.getSources();
+              
+              log.info(`🔍 Got ${sources.length} sources`);
+              
+              // Метод sendSourcesToWindow удален из JitsiNativeManager
+              // так как выбор источников теперь происходит внутри менеджера
+              const jitsiStatus = await jitsiManager.getStatus();
+              if (jitsiStatus.hasWindow) {
+                  // Этот вызов можно убрать, так как источники 
+                  // теперь запрашиваются внутри JitsiNativeManager
+                  // await jitsiManager.sendSourcesToWindow(sources);
+                  log.info(`Jitsi window is active, sources handled internally`);
+              }
+              
+          } catch (error: any) {
+              log.error(`🔍 Error: ${error.message}`);
+          }
+      }
   });
 
   ipcMain.on('ipc-invoke', async (event, data) => {
