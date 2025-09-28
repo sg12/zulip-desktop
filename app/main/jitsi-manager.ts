@@ -4,8 +4,6 @@ import * as path from "path";
 import log from "electron-log";
 import { NativeCaptureManager } from "./native-capture";
 import { JitsiScreenShareMonitor } from "./jitsi-screen-share-monitor";
-const DTLNProcessor = require(path.join(__dirname, '../lib/dtln-aec/dtln-tflite-processor'));
-const AudioProcessor = require(path.join(__dirname, '../lib/dtln-aec/audio-processor'));
 
 interface JitsiOptions {
   roomName: string;
@@ -296,6 +294,7 @@ export class JitsiManager {
     private aecProcessor: any; // DTLN-AEC процессор
     private aecEnabled: boolean = true;
     private aecStats: any = {};
+    private aecInitialized: boolean = false;
 
     constructor(
         nativeCapture: NativeCaptureManager,
@@ -330,21 +329,41 @@ export class JitsiManager {
          this.debugMonitoringStarted = false;
 
         log.info("[JITSI-MANAGER] Debug UI enabled:", this.config.enableDebugUI);
-        this.initializeAEC();
+
+        setTimeout(() => {
+            if (this.aecEnabled) {
+                this.ensureAECInitialized();
+            }
+        }, 1000);
     }
 
-    private async initializeAEC(): Promise<void> {
+    private async ensureAECInitialized(): Promise<boolean> {
+        if (this.aecInitialized) {
+            return true;
+        }
+        
         try {
-            this.aecProcessor = new DTLNProcessor();
-            await this.aecProcessor.initialize(256); // 256 - размер модели
+            log.info("[AEC] Lazy initialization starting...");
+            
+            if (!this.aecProcessor) {
+                const DTLNProcessor = require(path.join(__dirname, '../lib/dtln-aec/dtln-tflite-processor'));
+                this.aecProcessor = new DTLNProcessor();
+            }
+            
+            await this.aecProcessor.initialize(256);
             
             const stats = this.aecProcessor.getStats();
-            log.info("[AEC] Initialized:", stats);
+            log.info("[AEC] Initialized successfully:", stats);
             
+            this.aecInitialized = true;
             this.aecEnabled = true;
+            return true;
+            
         } catch (error: any) {
-            log.error("[AEC] Initialization failed:", error);
+            log.error("[AEC] Initialization failed:", error.message);
+            this.aecInitialized = false;
             this.aecEnabled = false;
+            return false;
         }
     }
 
@@ -1256,6 +1275,21 @@ export class JitsiManager {
             }
             
             return { success: true };
+        });
+
+        ipcMain.handle("jitsi:enable-aec", async () => {
+            if (!this.aecInitialized) {
+                const success = await this.ensureAECInitialized();
+                return { success, enabled: this.aecEnabled };
+            }
+            
+            this.aecEnabled = true;
+            return { success: true, enabled: true };
+        });
+
+        ipcMain.handle("jitsi:disable-aec", async () => {
+            this.aecEnabled = false;
+            return { success: true, enabled: false };
         });
 
     }
@@ -2942,12 +2976,19 @@ export class JitsiManager {
 
     // ===== 1. ЗАПУСК NATIVE АУДИО =====
     private async startNativeAudioCapture(sourceId: string): Promise<{ success: boolean; error?: string }> {
+        log.info(`[AUDIO-CAPTURE] Starting capture for source: ${sourceId}`);
         log.info("[STREAM-ELECTRON] >>> startNativeAudioCapture");
         log.info(`[STREAM-ELECTRON] Electron sourceId: ${sourceId}`);
         
         try {
             // Конвертируем Electron ID в формат для нативного плагина
             const nativeSourceId = await this.convertElectronToNativeId(sourceId);
+            console.log('[SOURCE] Selected source for capture:', {
+                electron: sourceId,
+                native: nativeSourceId,
+                type: sourceId.startsWith('screen:') ? 'screen' : 'window'
+            });
+
             log.info(`[STREAM-ELECTRON] Converted to native ID: ${nativeSourceId}`);
             
             if (this.config.useHybridMode) {
@@ -3590,6 +3631,16 @@ export class JitsiManager {
 
     // ===== 6. ОБРАБОТКА NATIVE АУДИО =====
     private processNativeAudio(audioData: any): void {
+
+        // Debug the raw data first
+        const rawBuffer = new Float32Array(audioData.data);
+        const maxRaw = Math.max(...rawBuffer.map(Math.abs));
+        console.log('[NATIVE-AUDIO] Raw buffer max amplitude:', maxRaw);
+        
+        if (maxRaw === 0) {
+            console.warn('[NATIVE-AUDIO] Receiving silent buffers from native capture!');
+        }
+
         if (!this.state.window || this.state.window.isDestroyed()) return;
         
         if(this.state.audioFrameCount)
@@ -3607,38 +3658,47 @@ export class JitsiManager {
                 ? this.decodeWindowsAudio(arrayBuffer, samples, channels)
                 : this.decodeMacOSAudio(arrayBuffer, samples, channels);
             
-            // Применяем AEC синхронно или с callback
-            if (this.aecEnabled && this.aecProcessor) {
-                // Конвертируем стерео в моно для AEC
-                const monoInput = this.stereoToMono(leftChannel, rightChannel);
+            // Пробуем применить AEC если включено
+            if (this.aecEnabled) {
+                // Инициализируем AEC при первом использовании
+                if (!this.aecInitialized) {
+                    this.ensureAECInitialized().then(initialized => {
+                        if (!initialized) {
+                            log.warn("[AEC] Failed to initialize, disabling");
+                            this.aecEnabled = false;
+                        }
+                    });
+                    
+                    // Пока AEC инициализируется, используем оригинальное аудио
+                    this.finalizeAudioProcessing(leftChannel, rightChannel, samples);
+                    return;
+                }
                 
-                // Получаем эхо-референс асинхронно
-                this.getEchoReferenceFromJitsi().then(echoReference => {
-                    // Обрабатываем через AEC
-                    this.aecProcessor.processBlock(monoInput, echoReference)
-                        .then((processed: Float32Array) => {
-                            // Конвертируем обратно в стерео
-                            const stereo = this.monoToStereo(processed);
-                            
-                            // Продолжаем обработку
-                            this.finalizeAudioProcessing(stereo.left, stereo.right, samples);
-                        })
-                        .catch((error: any) => {
-                            log.error("[AEC] Processing error:", error);
-                            // Fallback - используем оригинальное аудио
-                            this.finalizeAudioProcessing(leftChannel, rightChannel, samples);
-                        });
-                }).catch(() => {
-                    // Если не получили эхо-референс, обрабатываем без него
-                    this.aecProcessor.processBlock(monoInput, null)
-                        .then((processed: Float32Array) => {
-                            const stereo = this.monoToStereo(processed);
-                            this.finalizeAudioProcessing(stereo.left, stereo.right, samples);
-                        })
-                        .catch(() => {
-                            this.finalizeAudioProcessing(leftChannel, rightChannel, samples);
-                        });
-                });
+                // Если AEC инициализирован, используем его
+                if (this.aecInitialized && this.aecProcessor) {
+                    const monoInput = this.stereoToMono(leftChannel, rightChannel);
+                    
+                    // Используем синхронную версию для реального времени
+                    try {
+                        console.log('[AEC] Input level:', Math.max(...monoInput));
+
+                        const processed = this.aecProcessor.processBlockSync(monoInput, null);
+                        console.log('[AEC] Output level:', Math.max(...processed));
+
+                        const stereo = this.monoToStereo(processed);
+                        
+                        this.finalizeAudioProcessing(stereo.left, stereo.right, samples);
+                        
+                        // Обновляем эхо-референс в фоне
+                        this.updateEchoReferenceInBackground();
+                        
+                    } catch (error: any) {
+                        log.error("[AEC] Sync processing error:", error.message);
+                        this.finalizeAudioProcessing(leftChannel, rightChannel, samples);
+                    }
+                } else {
+                    this.finalizeAudioProcessing(leftChannel, rightChannel, samples);
+                }
             } else {
                 // Без AEC - используем существующую логику
                 this.finalizeAudioProcessing(leftChannel, rightChannel, samples);
@@ -3647,6 +3707,22 @@ export class JitsiManager {
         } catch (error: any) {
             log.error(`[AUDIO] processNativeAudio ERROR: ${error.message}`);
         }
+    }
+
+    private updateEchoReferenceInBackground(): void {
+        if (!this.aecInitialized || !this.aecProcessor) return;
+        
+        this.getEchoReferenceFromJitsi().then(reference => {
+            if (reference && this.aecProcessor) {
+                // Сохраняем референс для следующего использования
+                if (this.aecProcessor.adaptiveFilter) {
+                    // Обновляем референс в адаптивном фильтре
+                    this.aecProcessor.lastEchoReference = reference;
+                }
+            }
+        }).catch(() => {
+            // Игнорируем ошибки
+        });
     }
 
     // Новый метод для финальной обработки аудио
@@ -3740,40 +3816,13 @@ export class JitsiManager {
 
     // Новый метод для получения эхо-референса из Jitsi
     private async getEchoReferenceFromJitsi(): Promise<Float32Array | null> {
-        if (!this.state.window || this.state.window.isDestroyed()) {
-            return null;
-        }
-        
-        try {
-            const result = await this.state.window.webContents.executeJavaScript(`
-                (function() {
-                    // Получаем аудио от удаленных участников
-                    if (window.APP?.conference?._room) {
-                        const remoteTracks = window.APP.conference._room.getRemoteTracks();
-                        const audioTracks = remoteTracks.filter(t => t.getType() === 'audio');
-                        
-                        if (audioTracks.length > 0) {
-                            // Здесь нужно захватить буфер от удаленных треков
-                            // Это упрощенный пример
-                            if (window.lastRemoteAudioBuffer) {
-                                return Array.from(window.lastRemoteAudioBuffer);
-                            }
-                        }
-                    }
-                    return null;
-                })();
-            `);
-            
-            if (result) {
-                return new Float32Array(result);
-            }
-            
-            return null;
-            
-        } catch (error) {
-            return null;
-        }
-    }
+       const result = await this.state.window.webContents.executeJavaScript(`
+           // Add logging here
+           console.log('[AEC-REF] Checking for remote tracks...');
+           const remoteTracks = window.APP?.conference?._room?.getRemoteTracks();
+           console.log('[AEC-REF] Found tracks:', remoteTracks?.length || 0);
+       `);
+   }
     
     // Вспомогательные методы для конвертации аудио
     private stereoToMono(left: Float32Array, right: Float32Array): Float32Array {
@@ -3790,19 +3839,6 @@ export class JitsiManager {
             right: new Float32Array(mono)
         };
     }
-    
-    // Добавляем метод для включения/выключения AEC
-    async toggleAEC(enabled: boolean): Promise<void> {
-        this.aecEnabled = enabled;
-        
-        if (enabled && !this.aecProcessor) {
-            await this.initializeAEC();
-        } else if (!enabled && this.aecProcessor) {
-            this.aecProcessor.cleanup();
-        }
-        
-        log.info(`[AEC] ${enabled ? 'Enabled' : 'Disabled'}`);
-    }
 
     private decodeWindowsAudio(
         arrayBuffer: ArrayBuffer, 
@@ -3811,6 +3847,9 @@ export class JitsiManager {
     ): { leftChannel: Float32Array; rightChannel: Float32Array } {
         
         const float32Data = new Float32Array(arrayBuffer);
+        console.log('[DECODE] Buffer size:', arrayBuffer.byteLength, 'First 10 samples:', 
+                Array.from(float32Data.slice(0, 10)));
+        
         const leftChannel = new Float32Array(samples);
         const rightChannel = new Float32Array(samples);
         
