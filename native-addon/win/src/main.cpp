@@ -1,11 +1,10 @@
-#define NOMINMAX  // Предотвращаем конфликт с макросами min/max из Windows
+#define NOMINMAX
 #include <node_api.h>
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
-#include <endpointvolume.h>
 #include <audiopolicy.h>
 #include <thread>
 #include <atomic>
@@ -13,16 +12,13 @@
 #include <memory>
 #include <dwmapi.h>
 #include <psapi.h>
-#include "audio_format.h" 
 #include <algorithm>
 #include <string>
 #include <chrono>
 #include <mutex>
 #include <cstring>
 #include <cmath>
-
-#include <ks.h>
-#include <ksmedia.h>
+#include <propvarutil.h>
 #include <functiondiscoverykeys_devpkey.h>
 
 #pragma comment(lib, "d3d11.lib")
@@ -30,44 +26,46 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "propsys.lib")
 
-// Определение DWMWA_CLOAKED если его нет
+// Windows 11 22H2+ specific defines
+#ifndef AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
+#define AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK GUID{0xA4A8A15F, 0x11ED, 0x498A, {0x83, 0xE9, 0x05, 0x66, 0xE3, 0x3A, 0x7F, 0x6C}}
+#endif
+
+enum PROCESS_LOOPBACK_MODE {
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS = 0,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 1,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS = 2,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE = 3
+};
+
+struct AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+    DWORD TargetProcessId;
+    PROCESS_LOOPBACK_MODE ProcessLoopbackMode;
+};
+
+struct AUDIOCLIENT_ACTIVATION_PARAMS {
+    AUDIOCLIENT_ACTIVATION_TYPE ActivationType;
+    union {
+        AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS ProcessLoopbackParams;
+    };
+};
+
+typedef GUID AUDIOCLIENT_ACTIVATION_TYPE;
+
 #ifndef DWMWA_CLOAKED
 #define DWMWA_CLOAKED 14
 #endif
 
-#ifndef KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
-const GUID KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
-#endif
-
-#ifndef KSDATAFORMAT_SUBTYPE_PCM  
-const GUID KSDATAFORMAT_SUBTYPE_PCM = {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
-#endif
-
-#ifndef WAVE_FORMAT_IEEE_FLOAT
-#define WAVE_FORMAT_IEEE_FLOAT 0x0003
-#endif
-
-#ifndef WAVE_FORMAT_EXTENSIBLE
-#define WAVE_FORMAT_EXTENSIBLE 0xFFFE
-#endif
-
-#ifndef WAVE_FORMAT_PCM
-#define WAVE_FORMAT_PCM 0x0001
-#endif
-
-// Глобальные переменные для callbacks
+// Global callbacks
 static napi_threadsafe_function g_video_tsfn = nullptr;
 static napi_threadsafe_function g_audio_tsfn = nullptr;
 static std::atomic<uint64_t> g_video_frame_count{0};
 static std::atomic<uint64_t> g_audio_frame_count{0};
 static std::atomic<bool> g_capture_active{false};
 
-// НОВАЯ ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ ДЛЯ УПРАВЛЕНИЯ ГРОМКОСТЬЮ
-static std::atomic<float> g_participants_volume{0.20f};
-static std::mutex g_volume_mutex;
-
-// Структуры для передачи данных
+// Data structures
 struct VideoFrameData {
     uint8_t* data;
     int width;
@@ -87,7 +85,6 @@ struct AudioFrameData {
     std::string applicationName;
 };
 
-// Структура для хранения информации об источнике
 struct CaptureSource {
     std::string type;
     std::string id;
@@ -96,7 +93,7 @@ struct CaptureSource {
     int height;
 };
 
-// Глобальные параметры качества
+// Quality settings (minimal for CPU optimization)
 struct QualitySettings {
     int width = 1;
     int height = 1;
@@ -104,11 +101,12 @@ struct QualitySettings {
     std::mutex mutex;
 } g_quality;
 
-// Структура для передачи данных в callback перечисления окон
+// Window enumeration data
 struct EnumWindowsData {
     std::vector<CaptureSource>* sources;
 };
 
+// Simple synchronization manager
 struct SimpleSyncManager {
     LARGE_INTEGER frequency;
     LARGE_INTEGER startTime;
@@ -150,440 +148,7 @@ struct SimpleSyncManager {
 
 static SimpleSyncManager g_syncManager;
 
-double GetTimestamp() {
-    return g_syncManager.GetTimestamp();
-}
-
-class UniversalEchoCanceller {
-private:
-    static constexpr int SAMPLE_RATE = 48000;
-    static constexpr int MAX_DELAY_MS = 2000; // До 2 секунд
-    static constexpr int MAX_DELAY_SAMPLES = (MAX_DELAY_MS * SAMPLE_RATE) / 1000;
-    
-    std::vector<float> ringBuffer;
-    int writeIndex = 0;
-    
-    // Адаптивные параметры
-    int detectedDelay = 0;
-    float echoGain = 0.5f;
-    int searchCounter = 0;
-    
-    // Статистика для автоопределения
-    std::vector<float> correlationHistory;
-    
-public:
-    UniversalEchoCanceller() {
-        ringBuffer.resize(MAX_DELAY_SAMPLES, 0.0f);
-        correlationHistory.resize(20, 0.0f); // История последних 20 измерений
-    }
-    
-    void ProcessBuffer(std::vector<float>& samples) {
-        // Автоматический поиск задержки каждые 50 фреймов
-        if (++searchCounter % 50 == 0) {
-            DetectEchoDelay(samples);
-        }
-        
-        // Применяем подавление с найденной задержкой
-        if (detectedDelay > 0) {
-            ApplyEchoCancellation(samples);
-        }
-    }
-    
-private:
-    void DetectEchoDelay(const std::vector<float>& samples) {
-        float bestCorrelation = 0;
-        int bestDelay = 0;
-        
-        // Используем переменный шаг в зависимости от задержки
-        int delayMs = 100;
-        while (delayMs <= 2000) {
-            int delaySamples = (delayMs * SAMPLE_RATE) / 1000;
-            float correlation = CalculateCorrelation(samples, delaySamples);
-            
-            if (correlation > bestCorrelation) {
-                bestCorrelation = correlation;
-                bestDelay = delaySamples;
-            }
-            
-            // Переменный шаг: меньше для малых задержек, больше для больших
-            if (delayMs < 500) {
-                delayMs += 25;  // Шаг 25мс для задержек < 500мс
-            } else if (delayMs < 1000) {
-                delayMs += 50;  // Шаг 50мс для задержек 500-1000мс
-            } else {
-                delayMs += 100; // Шаг 100мс для задержек > 1000мс
-            }
-        }
-        
-        // Уточняющий проход с шагом 1мс вокруг максимума
-        if (bestCorrelation > 0.25f) {
-            int centerMs = (bestDelay * 1000) / SAMPLE_RATE;
-            
-            for (int delta = -10; delta <= 10; delta++) {
-                int testMs = centerMs + delta;
-                if (testMs < 100 || testMs > 2000) continue;
-                
-                int delaySamples = (testMs * SAMPLE_RATE) / 1000;
-                float correlation = CalculateCorrelation(samples, delaySamples);
-                
-                if (correlation > bestCorrelation) {
-                    bestCorrelation = correlation;
-                    bestDelay = delaySamples;
-                }
-            }
-        }
-        
-        // Применяем результат
-        if (bestCorrelation > 0.3f) {
-            detectedDelay = bestDelay;
-            echoGain = std::min(0.9f, bestCorrelation);
-            
-            char log[256];
-            sprintf_s(log, "[ECHO] Precise delay: %d.%dms, correlation: %.3f\n", 
-                    (bestDelay * 1000) / SAMPLE_RATE,
-                    ((bestDelay * 10000) / SAMPLE_RATE) % 10,
-                    bestCorrelation);
-            OutputDebugStringA(log);
-        }
-    }
-    
-    float CalculateCorrelation(const std::vector<float>& samples, int delaySamples) {
-        // Используем последние 2000 сэмплов для анализа
-        int analyzeLength = std::min(2000, (int)samples.size());
-        if (analyzeLength < 100) return 0;
-        
-        float correlation = 0;
-        float energy1 = 0;
-        float energy2 = 0;
-        
-        for (int i = 0; i < analyzeLength; i++) {
-            int currentIdx = samples.size() - analyzeLength + i;
-            int delayedIdx = (writeIndex - delaySamples - analyzeLength + i + MAX_DELAY_SAMPLES) % MAX_DELAY_SAMPLES;
-            
-            float current = samples[currentIdx];
-            float delayed = ringBuffer[delayedIdx];
-            
-            correlation += current * delayed;
-            energy1 += current * current;
-            energy2 += delayed * delayed;
-        }
-        
-        if (energy1 > 0.0001f && energy2 > 0.0001f) {
-            return fabs(correlation) / (sqrt(energy1) * sqrt(energy2));
-        }
-        
-        return 0;
-    }
-    
-    void ApplyEchoCancellation(std::vector<float>& samples) {
-        for (size_t i = 0; i < samples.size(); i++) {
-            // Сохраняем текущий сэмпл
-            ringBuffer[writeIndex] = samples[i];
-            
-            // Получаем задержанный сэмпл
-            int echoIdx = (writeIndex - detectedDelay + MAX_DELAY_SAMPLES) % MAX_DELAY_SAMPLES;
-            float echoSample = ringBuffer[echoIdx];
-            
-            // Адаптивное вычитание
-            float cleaned = samples[i] - (echoSample * echoGain);
-            
-            // Ограничитель для предотвращения искажений
-            float inputLevel = fabs(samples[i]);
-            float outputLevel = fabs(cleaned);
-            
-            // Если после вычитания сигнал стал громче - что-то не так
-            if (outputLevel > inputLevel * 1.5f) {
-                // Уменьшаем агрессивность
-                cleaned = samples[i] - (echoSample * echoGain * 0.5f);
-                echoGain *= 0.95f; // Адаптивно уменьшаем
-            }
-            
-            // Noise gate для остаточного эха
-            if (outputLevel < inputLevel * 0.1f) {
-                cleaned *= 0.5f;
-            }
-            
-            samples[i] = cleaned;
-            writeIndex = (writeIndex + 1) % MAX_DELAY_SAMPLES;
-        }
-    }
-};
-
-class EchoTestAndCancel {
-private:
-    static constexpr int SAMPLE_RATE = 48000;
-    
-    // Тестовый сигнал: двухтональный маркер
-    void GenerateTestTone(std::vector<float>& samples, int position) {
-        int toneLength = std::min(960, (int)samples.size() - position); // 20мс
-        
-        for (int i = 0; i < toneLength; i++) {
-            float t = (float)i / SAMPLE_RATE;
-            // Двухтональный сигнал: 880Hz + 1320Hz (уникальная комбинация)
-            float tone = 0.15f * (sinf(2.0f * 3.14159f * 880.0f * t) +
-                                  sinf(2.0f * 3.14159f * 1320.0f * t));
-            samples[position + i] += tone;
-        }
-    }
-    
-    // Детектор двухтонального сигнала
-    bool DetectTestTone(const std::vector<float>& samples, int position) {
-        if (position + 960 > samples.size()) return false;
-        
-        float energy880 = 0, energy1320 = 0;
-        
-        // Простой частотный анализ (Goertzel algorithm)
-        for (int i = 0; i < 960; i++) {
-            float t = (float)i / SAMPLE_RATE;
-            energy880 += samples[position + i] * sinf(2.0f * 3.14159f * 880.0f * t);
-            energy1320 += samples[position + i] * sinf(2.0f * 3.14159f * 1320.0f * t);
-        }
-        
-        energy880 = fabs(energy880) / 960;
-        energy1320 = fabs(energy1320) / 960;
-        
-        // Если обе частоты присутствуют - это наш маркер
-        return (energy880 > 0.05f && energy1320 > 0.05f);
-    }
-    
-public:
-    void ProcessAndTest(std::vector<float>& samples) {
-        static int testCounter = 0;
-        static std::vector<int> echoPositions;
-        
-        // Каждые 50 фреймов добавляем тестовый тон
-        if (++testCounter % 50 == 0) {
-            GenerateTestTone(samples, 0);
-            OutputDebugStringA("[TEST] Injected test tone\n");
-        }
-        
-        // Сканируем весь буфер на наличие тестовых тонов
-        int detectCount = 0;
-        for (size_t pos = 0; pos < samples.size() - 960; pos += 480) {
-            if (DetectTestTone(samples, pos)) {
-                detectCount++;
-                
-                // МОДИФИЦИРУЕМ найденное эхо
-                for (int i = 0; i < 960; i++) {
-                    // Создаем "рваный" звук для явной идентификации
-                    if ((i / 48) % 2 == 0) {
-                        samples[pos + i] *= 0.1f;  // Заглушаем
-                    } else {
-                        samples[pos + i] *= 2.0f;   // Усиливаем
-                    }
-                }
-                
-                // Запоминаем позицию для анализа задержки
-                echoPositions.push_back(pos);
-                
-                char log[256];
-                sprintf_s(log, "[ECHO-FOUND] Test tone detected at sample %zu (%.1fms from start)\n", 
-                         pos, (float)pos * 1000.0f / SAMPLE_RATE);
-                OutputDebugStringA(log);
-            }
-        }
-        
-        if (detectCount > 0) {
-            OutputDebugStringA("[SUCCESS] Echo cancellation is working! Modified echoes will sound distorted.\n");
-        }
-    }
-};
-
-// Класс для управления громкостью других приложений
-class VolumeController {
-private:
-    IMMDeviceEnumerator* deviceEnumerator = nullptr;
-    IMMDevice* device = nullptr;
-    IAudioSessionManager2* sessionManager = nullptr;
-    DWORD currentProcessId = 0;
-    std::thread volumeThread;
-    std::atomic<bool> isRunning{false};
-    
-public:
-    bool Initialize() {
-        currentProcessId = GetCurrentProcessId();
-        
-        HRESULT hr = CoCreateInstance(
-            __uuidof(MMDeviceEnumerator),
-            nullptr,
-            CLSCTX_ALL,
-            __uuidof(IMMDeviceEnumerator),
-            (void**)&deviceEnumerator
-        );
-        
-        if (FAILED(hr)) return false;
-        
-        hr = deviceEnumerator->GetDefaultAudioEndpoint(
-            eRender,
-            eConsole,
-            &device
-        );
-        
-        if (FAILED(hr)) return false;
-        
-        hr = device->Activate(
-            __uuidof(IAudioSessionManager2),
-            CLSCTX_ALL,
-            nullptr,
-            (void**)&sessionManager
-        );
-        
-        return SUCCEEDED(hr);
-    }
-    
-    void StartVolumeControl() {
-        if (isRunning) return;
-        
-        isRunning = true;
-        volumeThread = std::thread([this]() {
-            CoInitialize(nullptr);
-            
-            while (isRunning) {
-                UpdateVolumes();
-                Sleep(100); // Обновляем каждые 100мс
-            }
-            
-            CoUninitialize();
-        });
-    }
-    
-    void UpdateVolumes() {
-        if (!sessionManager) return;
-        
-        IAudioSessionEnumerator* sessionEnumerator = nullptr;
-        HRESULT hr = sessionManager->GetSessionEnumerator(&sessionEnumerator);
-        if (FAILED(hr)) return;
-        
-        int sessionCount = 0;
-        sessionEnumerator->GetCount(&sessionCount);
-        
-        float targetVolume = g_participants_volume.load();
-        
-        for (int i = 0; i < sessionCount; i++) {
-            IAudioSessionControl* sessionControl = nullptr;
-            hr = sessionEnumerator->GetSession(i, &sessionControl);
-            if (FAILED(hr)) continue;
-            
-            IAudioSessionControl2* sessionControl2 = nullptr;
-            hr = sessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&sessionControl2);
-            
-            if (SUCCEEDED(hr)) {
-                DWORD processId = 0;
-                hr = sessionControl2->GetProcessId(&processId);
-                
-                // Применяем громкость только к другим процессам (не к нашему Electron)
-                if (SUCCEEDED(hr) && processId != currentProcessId && processId != 0) {
-                    
-                    // Проверяем, является ли это браузером или коммуникационным приложением
-                    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-                    if (hProcess) {
-                        wchar_t exePath[MAX_PATH];
-                        DWORD pathLen = MAX_PATH;
-                        if (QueryFullProcessImageNameW(hProcess, 0, exePath, &pathLen)) {
-                            std::wstring fullPath(exePath);
-                            
-                            // Проверяем, является ли это браузером или VoIP приложением
-                            if (fullPath.find(L"chrome.exe") != std::wstring::npos ||
-                                fullPath.find(L"firefox.exe") != std::wstring::npos ||
-                                fullPath.find(L"msedge.exe") != std::wstring::npos ||
-                                fullPath.find(L"opera.exe") != std::wstring::npos ||
-                                fullPath.find(L"brave.exe") != std::wstring::npos ||
-                                fullPath.find(L"teams.exe") != std::wstring::npos ||
-                                fullPath.find(L"zoom.exe") != std::wstring::npos ||
-                                fullPath.find(L"skype.exe") != std::wstring::npos) {
-                                
-                                ISimpleAudioVolume* simpleVolume = nullptr;
-                                hr = sessionControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&simpleVolume);
-                                
-                                if (SUCCEEDED(hr)) {
-                                    // Устанавливаем громкость
-                                    simpleVolume->SetMasterVolume(targetVolume, nullptr);
-                                    simpleVolume->Release();
-                                    
-                                    char log[256];
-                                    sprintf_s(log, "Volume set to %.2f for PID: %lu\n", targetVolume, processId);
-                                    OutputDebugStringA(log);
-                                }
-                            }
-                        }
-                        CloseHandle(hProcess);
-                    }
-                }
-                
-                sessionControl2->Release();
-            }
-            
-            sessionControl->Release();
-        }
-        
-        sessionEnumerator->Release();
-    }
-    
-    void StopVolumeControl() {
-        isRunning = false;
-        if (volumeThread.joinable()) {
-            volumeThread.join();
-        }
-        
-        // Восстанавливаем громкость всех приложений на 100%
-        if (sessionManager) {
-            RestoreVolumes();
-        }
-    }
-    
-    void RestoreVolumes() {
-        IAudioSessionEnumerator* sessionEnumerator = nullptr;
-        HRESULT hr = sessionManager->GetSessionEnumerator(&sessionEnumerator);
-        if (FAILED(hr)) return;
-        
-        int sessionCount = 0;
-        sessionEnumerator->GetCount(&sessionCount);
-        
-        for (int i = 0; i < sessionCount; i++) {
-            IAudioSessionControl* sessionControl = nullptr;
-            hr = sessionEnumerator->GetSession(i, &sessionControl);
-            if (FAILED(hr)) continue;
-            
-            ISimpleAudioVolume* simpleVolume = nullptr;
-            hr = sessionControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&simpleVolume);
-            
-            if (SUCCEEDED(hr)) {
-                simpleVolume->SetMasterVolume(1.0f, nullptr);
-                simpleVolume->Release();
-            }
-            
-            sessionControl->Release();
-        }
-        
-        sessionEnumerator->Release();
-    }
-    
-    ~VolumeController() {
-        StopVolumeControl();
-        
-        // Правильная очистка COM объектов
-        if (sessionManager) {
-            sessionManager->Release();
-            sessionManager = nullptr;
-        }
-        if (device) {
-            device->Release();
-            device = nullptr;
-        }
-        if (deviceEnumerator) {
-            deviceEnumerator->Release();
-            deviceEnumerator = nullptr;
-        }
-        
-        // Деинициализация COM для основного потока
-        CoUninitialize();
-    }
-};
-
-// Глобальный экземпляр контроллера громкости
-static std::unique_ptr<VolumeController> g_volumeController;
-
-// Класс для захвата экрана через DXGI
+// Minimal video capture for compatibility
 class DXGIScreenCapture {
 private:
     ID3D11Device* device = nullptr;
@@ -591,22 +156,12 @@ private:
     IDXGIOutputDuplication* duplication = nullptr;
     std::atomic<bool> isCapturing{false};
     std::thread captureThread;
-    int targetWidth = 1920;
-    int targetHeight = 1080;
-    int targetFps = 30;
-    LARGE_INTEGER performanceFrequency;
-    LARGE_INTEGER captureStartTime;
     
 public:
     bool Initialize(int displayId) {
-        QueryPerformanceFrequency(&performanceFrequency);
-        QueryPerformanceCounter(&captureStartTime);
-        OutputDebugStringA("DXGIScreenCapture::Initialize starting\n");
-        
         D3D_FEATURE_LEVEL featureLevels[] = {
             D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_10_1,
-            D3D_FEATURE_LEVEL_10_0
+            D3D_FEATURE_LEVEL_10_1
         };
         
         D3D_FEATURE_LEVEL featureLevel;
@@ -623,12 +178,7 @@ public:
             &context
         );
         
-        if (FAILED(hr)) {
-            char log[128];
-            sprintf_s(log, "D3D11CreateDevice failed: 0x%08X\n", hr);
-            OutputDebugStringA(log);
-            return false;
-        }
+        if (FAILED(hr)) return false;
         
         IDXGIDevice* dxgiDevice = nullptr;
         hr = device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDevice);
@@ -652,29 +202,11 @@ public:
         hr = output1->DuplicateOutput(device, &duplication);
         output1->Release();
         
-        if (SUCCEEDED(hr)) {
-            OutputDebugStringA("DXGIScreenCapture::Initialize SUCCESS\n");
-        } else {
-            char log[128];
-            sprintf_s(log, "DXGIScreenCapture::Initialize FAILED: 0x%08X\n", hr);
-            OutputDebugStringA(log);
-        }
-        
         return SUCCEEDED(hr);
-    }
-
-    double GetPreciseVideoTimestamp() {
-        LARGE_INTEGER currentTime;
-        QueryPerformanceCounter(&currentTime);
-        
-        double elapsed = (double)(currentTime.QuadPart - captureStartTime.QuadPart);
-        return (elapsed / performanceFrequency.QuadPart) * 1000.0;
     }
     
     void SetQuality(int width, int height, int fps) {
-        targetWidth = 1;
-        targetHeight = 1;
-        targetFps = 1;
+        // Intentionally minimal
     }
     
     void StartCapture() {
@@ -685,126 +217,29 @@ public:
     }
     
     void CaptureLoop() {
-        int frameInterval = 1000 / targetFps;
-        
         while (isCapturing) {
-            auto frameStart = std::chrono::high_resolution_clock::now();
-            
-            IDXGIResource* desktopResource = nullptr;
-            DXGI_OUTDUPL_FRAME_INFO frameInfo;
-            
-            HRESULT hr = duplication->AcquireNextFrame(100, &frameInfo, &desktopResource);
-            
-            if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-                continue;
-            }
-            
-            if (SUCCEEDED(hr) && desktopResource) {
-                ID3D11Texture2D* texture = nullptr;
-                hr = desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&texture);
-                
-                if (SUCCEEDED(hr) && texture) {
-                    ProcessFrame(texture);
-                    texture->Release();
-                }
-                
-                desktopResource->Release();
-                duplication->ReleaseFrame();
-            } else if (hr == DXGI_ERROR_ACCESS_LOST) {
-                OutputDebugStringA("DXGI_ERROR_ACCESS_LOST - need to reinitialize\n");
-                break;
-            }
-            
-            auto frameEnd = std::chrono::high_resolution_clock::now();
-            auto frameDuration = std::chrono::duration_cast<std::chrono::milliseconds>(frameEnd - frameStart).count();
-            if (frameDuration < frameInterval) {
-                Sleep(frameInterval - frameDuration);
-            }
-        }
-    }
-    
-    void ProcessFrame(ID3D11Texture2D* texture) {
-        D3D11_TEXTURE2D_DESC desc;
-        texture->GetDesc(&desc);
-        
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        desc.BindFlags = 0;
-        desc.MiscFlags = 0;
-        
-        ID3D11Texture2D* stagingTexture = nullptr;
-        HRESULT hr = device->CreateTexture2D(&desc, nullptr, &stagingTexture);
-        
-        if (FAILED(hr) || !stagingTexture) return;
-        
-        context->CopyResource(stagingTexture, texture);
-        
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        hr = context->Map(stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
-        
-        if (SUCCEEDED(hr)) {
+            // Minimal 1x1 capture to satisfy WebRTC requirements
             VideoFrameData* frameData = new VideoFrameData();
-            frameData->width = targetWidth;
-            frameData->height = targetHeight;
+            frameData->width = 1;
+            frameData->height = 1;
             frameData->timestamp = g_syncManager.GetVideoTimestamp();
-            frameData->hasRealPixels = true;
-            
-            if (desc.Width != targetWidth || desc.Height != targetHeight) {
-                frameData->dataSize = targetWidth * targetHeight * 4;
-                frameData->data = new uint8_t[frameData->dataSize];
-                
-                float xRatio = (float)desc.Width / targetWidth;
-                float yRatio = (float)desc.Height / targetHeight;
-                
-                uint8_t* src = (uint8_t*)mapped.pData;
-                uint8_t* dst = frameData->data;
-                
-                for (int y = 0; y < targetHeight; y++) {
-                    for (int x = 0; x < targetWidth; x++) {
-                        int srcX = (int)(x * xRatio);
-                        int srcY = (int)(y * yRatio);
-                        int srcIdx = (srcY * mapped.RowPitch) + (srcX * 4);
-                        int dstIdx = (y * targetWidth + x) * 4;
-                        
-                        memcpy(&dst[dstIdx], &src[srcIdx], 4);
-                    }
-                }
-            } else {
-                frameData->dataSize = desc.Width * desc.Height * 4;
-                frameData->data = new uint8_t[frameData->dataSize];
-                
-                uint8_t* src = (uint8_t*)mapped.pData;
-                uint8_t* dst = frameData->data;
-                
-                for (UINT y = 0; y < desc.Height; y++) {
-                    memcpy(dst, src, desc.Width * 4);
-                    src += mapped.RowPitch;
-                    dst += desc.Width * 4;
-                }
-            }
-            
-            context->Unmap(stagingTexture, 0);
-            
-            g_video_frame_count++;
+            frameData->hasRealPixels = false;
+            frameData->dataSize = 4;
+            frameData->data = new uint8_t[4]{0, 0, 0, 255};
             
             if (g_video_tsfn) {
-                napi_status status = napi_call_threadsafe_function(
+                napi_call_threadsafe_function(
                     g_video_tsfn,
                     frameData,
-                    napi_tsfn_blocking
+                    napi_tsfn_nonblocking
                 );
-                
-                if (status != napi_ok) {
-                    delete[] frameData->data;
-                    delete frameData;
-                }
             } else {
                 delete[] frameData->data;
                 delete frameData;
             }
+            
+            Sleep(1000); // 1 fps
         }
-        
-        stagingTexture->Release();
     }
     
     void StopCapture() {
@@ -822,8 +257,8 @@ public:
     }
 };
 
-// === НОВЫЙ КЛАСС для захвата звука от конкретного приложения ===
-class ApplicationAudioCapture {
+// Windows 11 Process-specific audio capture
+class ProcessAudioCapture {
 private:
     DWORD targetProcessId = 0;
     std::wstring applicationName;
@@ -831,36 +266,18 @@ private:
     IMMDevice* device = nullptr;
     IAudioClient* audioClient = nullptr;
     IAudioCaptureClient* captureClient = nullptr;
-    IAudioSessionManager2* sessionManager = nullptr;
     WAVEFORMATEX* waveFormat = nullptr;
     
-    UniversalEchoCanceller echoCanceller;
-    bool echoEnabled = true;
-
-    EchoTestAndCancel echoTester;  // Добавляем тестер
-    bool testMode = true;  // Включаем тестовый режим
-
-
     std::atomic<bool> isCapturing{false};
     std::thread captureThread;
     std::vector<float> accumulationBuffer;
     std::mutex bufferMutex;
     const int TARGET_FRAME_SIZE = 960;
     
-    std::atomic<float> targetProcessVolume{0.0f};
-    std::atomic<bool> isTargetProcessActive{false};
-    
     LARGE_INTEGER performanceFrequency;
     LARGE_INTEGER captureStartTime;
-
-    bool enableTestSignal = false;
-    float testSignalFrequency = 440.0f; // Частота ноты Ля
-    float testSignalAmplitude = 0.3f;
-    size_t testSignalPhase = 0;
     
-    // Режим диагностики
-    bool diagnosticMode = false; // ВКЛЮЧАЕМ для теста
-    int diagnosticFrameCount = 0;
+    bool useProcessLoopback = false;
     
 public:
     bool InitializeForApplication(HWND hwnd) {
@@ -871,6 +288,7 @@ public:
         
         GetWindowThreadProcessId(hwnd, &targetProcessId);
         
+        // Get application name
         HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, targetProcessId);
         if (hProcess) {
             wchar_t exePath[MAX_PATH];
@@ -907,26 +325,84 @@ public:
         
         if (FAILED(hr)) return false;
         
-        hr = device->Activate(
-            __uuidof(IAudioSessionManager2),
-            CLSCTX_ALL,
-            nullptr,
-            (void**)&sessionManager
+        // Try Windows 11 process-specific loopback first
+        if (!InitializeProcessLoopback()) {
+            // Fallback to standard loopback
+            OutputDebugStringA("Process loopback not available, using standard loopback\n");
+            hr = InitializeStandardLoopback();
+            if (FAILED(hr)) return false;
+        }
+        
+        hr = audioClient->GetService(
+            __uuidof(IAudioCaptureClient),
+            (void**)&captureClient
         );
         
-        if (FAILED(hr)) return false;
+        return SUCCEEDED(hr);
+    }
+    
+    bool InitializeProcessLoopback() {
+        // Windows 11 22H2+ process-specific loopback
+        AUDIOCLIENT_ACTIVATION_PARAMS activationParams = {};
+        activationParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+        activationParams.ProcessLoopbackParams.TargetProcessId = targetProcessId;
+        activationParams.ProcessLoopbackParams.ProcessLoopbackMode = 
+            PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
         
-        hr = device->Activate(
+        PROPVARIANT propvar;
+        PropVariantInit(&propvar);
+        propvar.vt = VT_BLOB;
+        propvar.blob.cbSize = sizeof(activationParams);
+        propvar.blob.pBlobData = (BYTE*)&activationParams;
+        
+        HRESULT hr = device->Activate(
+            __uuidof(IAudioClient),
+            CLSCTX_ALL,
+            &propvar,
+            (void**)&audioClient
+        );
+        
+        PropVariantClear(&propvar);
+        
+        if (SUCCEEDED(hr)) {
+            hr = audioClient->GetMixFormat(&waveFormat);
+            if (SUCCEEDED(hr)) {
+                hr = audioClient->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    0, // Flags already in activation params
+                    20000000,
+                    0,
+                    waveFormat,
+                    nullptr
+                );
+                
+                if (SUCCEEDED(hr)) {
+                    useProcessLoopback = true;
+                    OutputDebugStringA("Process-specific loopback initialized successfully\n");
+                    return true;
+                }
+            }
+            
+            audioClient->Release();
+            audioClient = nullptr;
+        }
+        
+        return false;
+    }
+    
+    HRESULT InitializeStandardLoopback() {
+        // Fallback to standard loopback for older Windows versions
+        HRESULT hr = device->Activate(
             __uuidof(IAudioClient),
             CLSCTX_ALL,
             nullptr,
             (void**)&audioClient
         );
         
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) return hr;
         
         hr = audioClient->GetMixFormat(&waveFormat);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) return hr;
         
         hr = audioClient->Initialize(
             AUDCLNT_SHAREMODE_SHARED,
@@ -937,99 +413,7 @@ public:
             nullptr
         );
         
-        if (FAILED(hr)) return false;
-        
-        hr = audioClient->GetService(
-            __uuidof(IAudioCaptureClient),
-            (void**)&captureClient
-        );
-        
-        if (SUCCEEDED(hr)) {
-            StartSessionMonitoring();
-            OutputDebugStringA("Application audio capture initialized successfully\n");
-        }
-        
-        return SUCCEEDED(hr);
-    }
-    
-    void StartSessionMonitoring() {
-        std::thread monitorThread([this]() {
-            CoInitialize(nullptr);
-            
-            while (isCapturing) {
-                UpdateTargetProcessVolume();
-                Sleep(100);
-            }
-            
-            CoUninitialize();
-        });
-        monitorThread.detach();
-    }
-    
-    void UpdateTargetProcessVolume() {
-        if (!sessionManager) return;
-        
-        IAudioSessionEnumerator* sessionEnumerator = nullptr;
-        HRESULT hr = sessionManager->GetSessionEnumerator(&sessionEnumerator);
-        if (FAILED(hr)) return;
-        
-        int sessionCount = 0;
-        sessionEnumerator->GetCount(&sessionCount);
-        
-        bool foundTarget = false;
-        float maxVolume = 0.0f;
-        
-        for (int i = 0; i < sessionCount; i++) {
-            IAudioSessionControl* sessionControl = nullptr;
-            hr = sessionEnumerator->GetSession(i, &sessionControl);
-            if (FAILED(hr)) continue;
-            
-            IAudioSessionControl2* sessionControl2 = nullptr;
-            hr = sessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&sessionControl2);
-            
-            if (SUCCEEDED(hr)) {
-                DWORD processId = 0;
-                hr = sessionControl2->GetProcessId(&processId);
-                
-                if (SUCCEEDED(hr) && processId == targetProcessId) {
-                    AudioSessionState state;
-                    hr = sessionControl->GetState(&state);
-                    
-                    if (SUCCEEDED(hr) && state == AudioSessionStateActive) {
-                        ISimpleAudioVolume* simpleVolume = nullptr;
-                        hr = sessionControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&simpleVolume);
-                        
-                        if (SUCCEEDED(hr)) {
-                            float masterVolume = 0.0f;
-                            simpleVolume->GetMasterVolume(&masterVolume);
-                            
-                            IAudioMeterInformation* meterInfo = nullptr;
-                            hr = sessionControl->QueryInterface(__uuidof(IAudioMeterInformation), (void**)&meterInfo);
-                            
-                            if (SUCCEEDED(hr)) {
-                                float peakValue = 0.0f;
-                                meterInfo->GetPeakValue(&peakValue);
-                                maxVolume = peakValue * masterVolume;
-                                meterInfo->Release();
-                            }
-                            
-                            simpleVolume->Release();
-                        }
-                        
-                        foundTarget = true;
-                    }
-                }
-                
-                sessionControl2->Release();
-            }
-            
-            sessionControl->Release();
-        }
-        
-        targetProcessVolume = maxVolume;
-        isTargetProcessActive = foundTarget;
-        
-        sessionEnumerator->Release();
+        return hr;
     }
     
     bool InitializeForSystemAudio() {
@@ -1056,27 +440,7 @@ public:
         
         if (FAILED(hr)) return false;
         
-        hr = device->Activate(
-            __uuidof(IAudioClient),
-            CLSCTX_ALL,
-            nullptr,
-            (void**)&audioClient
-        );
-        
-        if (FAILED(hr)) return false;
-        
-        hr = audioClient->GetMixFormat(&waveFormat);
-        if (FAILED(hr)) return false;
-        
-        hr = audioClient->Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
-            20000000,
-            0,
-            waveFormat,
-            nullptr
-        );
-        
+        hr = InitializeStandardLoopback();
         if (FAILED(hr)) return false;
         
         hr = audioClient->GetService(
@@ -1085,13 +449,6 @@ public:
         );
         
         return SUCCEEDED(hr);
-    }
-
-    void EnableEchoCancellation(bool enable) {
-        echoEnabled = enable;
-        OutputDebugStringA(enable ? 
-            "Echo cancellation ENABLED\n" : 
-            "Echo cancellation DISABLED\n");
     }
     
     void StartCapture() {
@@ -1113,7 +470,11 @@ public:
                 CaptureLoop();
                 CoUninitialize();
             });
-            OutputDebugStringA("Application audio capture started\n");
+            
+            const char* captureType = useProcessLoopback ? 
+                "Process-specific audio capture started\n" : 
+                "System audio capture started (fallback)\n";
+            OutputDebugStringA(captureType);
         }
     }
     
@@ -1154,144 +515,53 @@ public:
         size_t sampleCount = numFrames * waveFormat->nChannels;
         std::vector<float> samples(sampleCount);
         
-        // ДИАГНОСТИКА: Проверяем что приходит от Windows
-        static int debugCounter = 0;
-        debugCounter++;
-        
-        // ============================================
-        // КОНВЕРТАЦИЯ В FLOAT
-        // ============================================
-        bool hasNonZero = false;
-        
+        // Convert to float
         if (waveFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
             float* srcFloat = (float*)data;
             for (size_t i = 0; i < sampleCount; i++) {
                 samples[i] = srcFloat[i];
-                if (fabs(samples[i]) > 0.0001f) hasNonZero = true;
             }
         } else if (waveFormat->wFormatTag == WAVE_FORMAT_PCM) {
             if (waveFormat->wBitsPerSample == 16) {
                 INT16* src = (INT16*)data;
                 for (size_t i = 0; i < sampleCount; i++) {
                     samples[i] = src[i] / 32768.0f;
-                    if (fabs(samples[i]) > 0.0001f) hasNonZero = true;
                 }
             } else if (waveFormat->wBitsPerSample == 32) {
                 INT32* src = (INT32*)data;
                 for (size_t i = 0; i < sampleCount; i++) {
                     samples[i] = src[i] / 2147483648.0f;
-                    if (fabs(samples[i]) > 0.0001f) hasNonZero = true;
                 }
             }
         } else if (waveFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
             WAVEFORMATEXTENSIBLE* pWaveFormatExt = (WAVEFORMATEXTENSIBLE*)waveFormat;
             
+            static const GUID KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = 
+                {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+            static const GUID KSDATAFORMAT_SUBTYPE_PCM = 
+                {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+            
             if (IsEqualGUID(pWaveFormatExt->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
                 float* srcFloat = (float*)data;
                 for (size_t i = 0; i < sampleCount; i++) {
                     samples[i] = srcFloat[i];
-                    if (fabs(samples[i]) > 0.0001f) hasNonZero = true;
                 }
             } else if (IsEqualGUID(pWaveFormatExt->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)) {
                 if (waveFormat->wBitsPerSample == 16) {
                     INT16* src = (INT16*)data;
                     for (size_t i = 0; i < sampleCount; i++) {
                         samples[i] = src[i] / 32768.0f;
-                        if (fabs(samples[i]) > 0.0001f) hasNonZero = true;
                     }
                 } else if (waveFormat->wBitsPerSample == 32) {
                     INT32* src = (INT32*)data;
                     for (size_t i = 0; i < sampleCount; i++) {
                         samples[i] = src[i] / 2147483648.0f;
-                        if (fabs(samples[i]) > 0.0001f) hasNonZero = true;
-                    }
-                } else if (waveFormat->wBitsPerSample == 24) {
-                    for (size_t i = 0; i < sampleCount; i++) {
-                        BYTE* samplePtr = data + (i * 3);
-                        INT32 sample = (samplePtr[0] | (samplePtr[1] << 8) | (samplePtr[2] << 16));
-                        if (sample & 0x800000) sample |= 0xFF000000;
-                        samples[i] = sample / 8388608.0f;
-                        if (fabs(samples[i]) > 0.0001f) hasNonZero = true;
                     }
                 }
             }
         }
         
-        // ============================================
-        // РЕЖИМ ТЕСТИРОВАНИЯ ЭХОПОДАВЛЕНИЯ
-        // ============================================
-        if (testMode) {
-            // В тестовом режиме ТОЛЬКО тестируем эхо
-            echoTester.ProcessAndTest(samples);
-            
-            // Логируем что мы в тестовом режиме
-            static int testLogCounter = 0;
-            if (++testLogCounter % 100 == 0) {
-                OutputDebugStringA("[TEST-MODE] Echo test active, listening for echoes...\n");
-            }
-        } 
-        else if (echoEnabled && !diagnosticMode) {
-            // ============================================
-            // ОБЫЧНОЕ ЭХОПОДАВЛЕНИЕ (когда не в тесте)
-            // ============================================
-            
-            // Если стерео - обрабатываем каждый канал
-            if (waveFormat->nChannels == 2) {
-                std::vector<float> leftChannel;
-                std::vector<float> rightChannel;
-                
-                // Разделяем каналы
-                for (size_t i = 0; i < samples.size(); i += 2) {
-                    leftChannel.push_back(samples[i]);
-                    rightChannel.push_back(samples[i + 1]);
-                }
-                
-                // Обрабатываем каждый канал
-                echoCanceller.ProcessBuffer(leftChannel);
-                echoCanceller.ProcessBuffer(rightChannel);
-                
-                // Объединяем обратно
-                for (size_t i = 0; i < leftChannel.size(); i++) {
-                    samples[i * 2] = leftChannel[i];
-                    samples[i * 2 + 1] = rightChannel[i];
-                }
-            } else {
-                // Моно - обрабатываем напрямую
-                echoCanceller.ProcessBuffer(samples);
-            }
-        }
-        
-        // ============================================
-        // ДИАГНОСТИКА (только если не в тесте)
-        // ============================================
-        if (!testMode && (debugCounter <= 10 || debugCounter % 100 == 0)) {
-            float rms = 0;
-            float maxSample = 0;
-            for (size_t i = 0; i < sampleCount && i < 1000; i++) {
-                rms += samples[i] * samples[i];
-                if (fabs(samples[i]) > maxSample) maxSample = fabs(samples[i]);
-            }
-            size_t divisor = sampleCount < 1000 ? sampleCount : 1000;
-            rms = sqrt(rms / divisor);
-            
-            char log[512];
-            sprintf_s(log, "[AUDIO-DIAG] Frame %d: RMS=%.6f, Max=%.6f, TestMode=%s, EchoEnabled=%s\n",
-                    debugCounter, rms, maxSample,
-                    testMode ? "ON" : "OFF",
-                    echoEnabled ? "ON" : "OFF");
-            OutputDebugStringA(log);
-        }
-        
-        // ============================================
-        // ФИНАЛЬНАЯ ОБРАБОТКА И ОТПРАВКА
-        // ============================================
-        
-        // Применяем фильтрацию процесса (если нужно)
-        if (!diagnosticMode && !testMode && targetProcessId != 0 && !echoEnabled) {
-            ApplyProcessFilter(samples);
-        }
-        
-        // Добавляем в буфер
+        // Add to buffer
         {
             std::lock_guard<std::mutex> lock(bufferMutex);
             accumulationBuffer.insert(accumulationBuffer.end(), 
@@ -1299,26 +569,6 @@ public:
         }
         
         SendBufferedFrames();
-    }
-        
-    void ApplyProcessFilter(std::vector<float>& samples) {
-        // ВРЕМЕННО ОТКЛЮЧЕНО для отладки
-        return;
-        
-        /* Оригинальный код фильтрации
-        if (!isTargetProcessActive) {
-            for (auto& sample : samples) {
-                sample *= 0.1f;
-            }
-        } else {
-            float volume = targetProcessVolume.load();
-            if (volume < 0.1f) {
-                for (auto& sample : samples) {
-                    sample *= 0.2f;
-                }
-            }
-        }
-        */
     }
     
     void SendBufferedFrames() {
@@ -1335,19 +585,17 @@ public:
             frameData->sampleRate = waveFormat->nSamplesPerSec;
             frameData->channels = waveFormat->nChannels;
             frameData->timestamp = g_syncManager.GetAudioTimestamp();
-            frameData->isSystemAudio = (targetProcessId == 0);
+            frameData->isSystemAudio = !useProcessLoopback;
             
-            // В режиме диагностики добавляем маркер
-            if (diagnosticMode) {
-                char diagName[256];
-                sprintf_s(diagName, "DIAG_%s_%s", 
-                        (diagnosticFrameCount/100 % 2 == 0) ? "TEST" : "REAL",
-                        applicationName.empty() ? "System" : "App");
-                frameData->applicationName = diagName;
-            } else if (!applicationName.empty()) {
+            if (!applicationName.empty()) {
                 char appName[256] = {0};
                 wcstombs(appName, applicationName.c_str(), sizeof(appName) - 1);
                 frameData->applicationName = appName;
+                
+                // Add indicator if using process-specific capture
+                if (useProcessLoopback) {
+                    frameData->applicationName += " [Process Audio]";
+                }
             }
             
             size_t frameSampleCount = TARGET_FRAME_SIZE * waveFormat->nChannels;
@@ -1356,25 +604,6 @@ public:
             std::copy(accumulationBuffer.begin(), 
                     accumulationBuffer.begin() + frameSampleCount,
                     frameData->samples);
-            
-            // ДИАГНОСТИКА: Проверяем что отправляем
-            static int sendCounter = 0;
-            sendCounter++;
-            if (sendCounter <= 10 || sendCounter % 100 == 0) {
-                float maxVal = 0;
-                float rms = 0;
-                for (size_t i = 0; i < frameSampleCount; i++) {
-                    maxVal = (std::max)(maxVal, std::abs(frameData->samples[i]));
-                    rms += frameData->samples[i] * frameData->samples[i];
-                }
-                rms = sqrt(rms / frameSampleCount);
-                
-                char log[256];
-                sprintf_s(log, "[SEND-DIAG] Sending frame %d: RMS=%.6f, MAX=%.6f, samples=%d, source=%s\n",
-                        sendCounter, rms, maxVal, frameData->numSamples,
-                        frameData->applicationName.c_str());
-                OutputDebugStringA(log);
-            }
             
             accumulationBuffer.erase(accumulationBuffer.begin(), 
                                 accumulationBuffer.begin() + frameSampleCount);
@@ -1417,14 +646,11 @@ public:
             std::lock_guard<std::mutex> lock(bufferMutex);
             accumulationBuffer.clear();
         }
-        
-        OutputDebugStringA("Application audio capture stopped\n");
     }
     
-    ~ApplicationAudioCapture() {
+    ~ProcessAudioCapture() {
         StopCapture();
         
-        if (sessionManager) sessionManager->Release();
         if (captureClient) captureClient->Release();
         if (audioClient) audioClient->Release();
         if (device) device->Release();
@@ -1435,71 +661,12 @@ public:
     }
 };
 
-// Глобальные экземпляры захвата
+// Global capture instances
 static std::unique_ptr<DXGIScreenCapture> g_screenCapture;
-static std::unique_ptr<ApplicationAudioCapture> g_appAudioCapture;
+static std::unique_ptr<ProcessAudioCapture> g_audioCapture;
 static CaptureSource g_currentSource;
 
-// === N-API функции ===
-
-// Тестовый метод
-napi_value TestMethod(napi_env env, napi_callback_info info) {
-    napi_value result;
-    napi_create_string_utf8(env, "Windows Native Module v1.0 - Application Audio Support with Volume Control", NAPI_AUTO_LENGTH, &result);
-    return result;
-}
-
-napi_value SetParticipantsVolume(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value argv[1];
-    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-    
-    float volume = 0.20f; // Значение по умолчанию
-    
-    if (argc >= 1) {
-        double inputVolume;
-        napi_status status = napi_get_value_double(env, argv[0], &inputVolume);
-        
-        if (status == napi_ok) {
-            // Ограничиваем значение от 0 до 1
-            volume = (float)std::max(0.0, std::min(1.0, inputVolume));
-        }
-    }
-    
-    // Устанавливаем новое значение громкости
-    {
-        std::lock_guard<std::mutex> lock(g_volume_mutex);
-        g_participants_volume = volume;
-    }
-    
-    char log[128];
-    sprintf_s(log, "Participants volume set to: %.2f\n", volume);
-    OutputDebugStringA(log);
-    
-    napi_value result;
-    napi_create_object(env, &result);
-    
-    napi_value success, volumeSet;
-    napi_get_boolean(env, true, &success);
-    napi_create_double(env, volume, &volumeSet);
-    
-    napi_set_named_property(env, result, "success", success);
-    napi_set_named_property(env, result, "volume", volumeSet);
-    
-    return result;
-}
-
-// НОВАЯ ФУНКЦИЯ: Получение текущей громкости участников
-napi_value GetParticipantsVolume(napi_env env, napi_callback_info info) {
-    float currentVolume = g_participants_volume.load();
-    
-    napi_value result;
-    napi_create_double(env, currentVolume, &result);
-    
-    return result;
-}
-
-// Callback функция для перечисления окон
+// Window enumeration callback
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     if (!IsWindowVisible(hwnd)) return TRUE;
     
@@ -1512,7 +679,6 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     DWORD exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
     
     if ((style & WS_CHILD) || (exStyle & WS_EX_TOOLWINDOW)) return TRUE;
-    
     if (!(style & WS_VISIBLE)) return TRUE;
     
     RECT rect;
@@ -1553,12 +719,10 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     CaptureSource source;
     source.type = "window";
     source.id = std::to_string((intptr_t)hwnd);
-    
     source.name = std::string(windowTitle);
     if (!processName.empty()) {
         source.name += " (" + processName + ")";
     }
-    
     source.width = width;
     source.height = height;
     
@@ -1567,13 +731,21 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
-// Получение доступных источников
+// === N-API Functions ===
+
+napi_value TestMethod(napi_env env, napi_callback_info info) {
+    napi_value result;
+    napi_create_string_utf8(env, "Windows 11 Process Audio Capture Module v2.0", NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
 napi_value GetAvailableSources(napi_env env, napi_callback_info info) {
     napi_value array;
     napi_create_array(env, &array);
     
     std::vector<CaptureSource> sources;
     
+    // Enumerate displays
     IDXGIFactory1* factory = nullptr;
     HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory);
     
@@ -1612,24 +784,12 @@ napi_value GetAvailableSources(napi_env env, napi_callback_info info) {
         factory->Release();
     }
     
-    RECT virtualScreen;
-    virtualScreen.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    virtualScreen.top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    virtualScreen.right = virtualScreen.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    virtualScreen.bottom = virtualScreen.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    
-    CaptureSource entireScreen;
-    entireScreen.type = "screen";
-    entireScreen.id = "entire_screen";
-    entireScreen.name = "Entire Screen (All Displays)";
-    entireScreen.width = virtualScreen.right - virtualScreen.left;
-    entireScreen.height = virtualScreen.bottom - virtualScreen.top;
-    sources.push_back(entireScreen);
-    
+    // Enumerate windows
     EnumWindowsData enumData;
     enumData.sources = &sources;
     EnumWindows(EnumWindowsProc, (LPARAM)&enumData);
     
+    // Convert to JavaScript array
     for (size_t i = 0; i < sources.size(); i++) {
         napi_value obj;
         napi_create_object(env, &obj);
@@ -1653,7 +813,6 @@ napi_value GetAvailableSources(napi_env env, napi_callback_info info) {
     return array;
 }
 
-// Установка источника захвата
 napi_value SetCaptureSource(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
@@ -1686,10 +845,8 @@ napi_value SetCaptureSource(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// Установка качества захвата
 napi_value SetCaptureQuality(napi_env env, napi_callback_info info) {
-    // ИГНОРИРУЕМ входящие параметры
-    // Всегда используем минимум для экономии CPU  
+    // Intentionally minimal for CPU optimization
     {
         std::lock_guard<std::mutex> lock(g_quality.mutex);
         g_quality.width = 1;
@@ -1710,37 +867,23 @@ napi_value SetCaptureQuality(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// Начало захвата
 napi_value StartCapture(napi_env env, napi_callback_info info) {
     g_syncManager.Initialize();
     g_syncManager.Reset();
-    OutputDebugStringA("Sync manager initialized\n");
-    
-    // Инициализируем и запускаем контроллер громкости
-    if (!g_volumeController) {
-        CoInitialize(nullptr); // Инициализация COM для главного потока
-        g_volumeController = std::make_unique<VolumeController>();
-        if (g_volumeController->Initialize()) {
-            g_volumeController->StartVolumeControl();
-            OutputDebugStringA("Volume controller started\n");
-        } else {
-            OutputDebugStringA("Failed to initialize volume controller\n");
-            g_volumeController.reset(); // Очищаем если не удалось инициализировать
-        }
-    }
     
     if (g_screenCapture) {
         g_screenCapture->StopCapture();
         g_screenCapture.reset();
     }
-    if (g_appAudioCapture) {
-        g_appAudioCapture->StopCapture();
-        g_appAudioCapture.reset();
+    if (g_audioCapture) {
+        g_audioCapture->StopCapture();
+        g_audioCapture.reset();
     }
     
     bool videoStarted = false;
     bool audioStarted = false;
     
+    // Start minimal video capture
     if (g_currentSource.type == "screen" || 
         g_currentSource.type == "display" || 
         g_currentSource.type == "window") {
@@ -1753,29 +896,27 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
         
         g_screenCapture = std::make_unique<DXGIScreenCapture>();
         if (g_screenCapture->Initialize(displayId)) {
-            std::lock_guard<std::mutex> lock(g_quality.mutex);
-            g_screenCapture->SetQuality(g_quality.width, g_quality.height, g_quality.fps);
-            
+            g_screenCapture->SetQuality(1, 1, 1);
             g_screenCapture->StartCapture();
             videoStarted = true;
         }
     }
     
-    // Запускаем аудио захват с поддержкой захвата от приложений
+    // Start audio capture with process-specific support
     if (g_currentSource.type == "window") {
         try {
             HWND hwnd = (HWND)std::stoull(g_currentSource.id);
             
             if (IsWindow(hwnd)) {
-                g_appAudioCapture = std::make_unique<ApplicationAudioCapture>();
+                g_audioCapture = std::make_unique<ProcessAudioCapture>();
                 
-                if (g_appAudioCapture->InitializeForApplication(hwnd)) {
-                    g_appAudioCapture->StartCapture();
+                if (g_audioCapture->InitializeForApplication(hwnd)) {
+                    g_audioCapture->StartCapture();
                     audioStarted = true;
-                    OutputDebugStringA("Started application-specific audio capture\n");
+                    OutputDebugStringA("Started application audio capture\n");
                 } else {
-                    if (g_appAudioCapture->InitializeForSystemAudio()) {
-                        g_appAudioCapture->StartCapture();
+                    if (g_audioCapture->InitializeForSystemAudio()) {
+                        g_audioCapture->StartCapture();
                         audioStarted = true;
                         OutputDebugStringA("Fallback to system audio capture\n");
                     }
@@ -1785,9 +926,9 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
             OutputDebugStringA("Exception in window audio capture\n");
         }
     } else {
-        g_appAudioCapture = std::make_unique<ApplicationAudioCapture>();
-        if (g_appAudioCapture->InitializeForSystemAudio()) {
-            g_appAudioCapture->StartCapture();
+        g_audioCapture = std::make_unique<ProcessAudioCapture>();
+        if (g_audioCapture->InitializeForSystemAudio()) {
+            g_audioCapture->StartCapture();
             audioStarted = true;
             OutputDebugStringA("Started system audio capture\n");
         }
@@ -1812,27 +953,17 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// Остановка захвата
 napi_value StopCapture(napi_env env, napi_callback_info info) {
     g_capture_active = false;
-    
-    // Останавливаем контроллер громкости
-    if (g_volumeController) {
-        g_volumeController->StopVolumeControl();
-        g_volumeController.reset();
-        CoUninitialize(); // Деинициализация COM
-        OutputDebugStringA("Volume controller stopped and cleaned up\n");
-    }
-
     
     if (g_screenCapture) {
         g_screenCapture->StopCapture();
         g_screenCapture.reset();
     }
     
-    if (g_appAudioCapture) {
-        g_appAudioCapture->StopCapture();
-        g_appAudioCapture.reset();
+    if (g_audioCapture) {
+        g_audioCapture->StopCapture();
+        g_audioCapture.reset();
     }
     
     napi_value result;
@@ -1845,7 +976,6 @@ napi_value StopCapture(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// Установка callback для видео
 napi_value SetWebRTCVideoCallback(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
@@ -1905,7 +1035,7 @@ napi_value SetWebRTCVideoCallback(napi_env env, napi_callback_info info) {
             napi_get_global(env, &global);
             
             napi_value result;
-            napi_status status = napi_call_function(env, global, js_callback, 1, &videoInfo, &result);
+            napi_call_function(env, global, js_callback, 1, &videoInfo, &result);
             
             delete[] frameData->data;
             delete frameData;
@@ -1918,7 +1048,6 @@ napi_value SetWebRTCVideoCallback(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// Установка callback для аудио
 napi_value SetWebRTCAudioCallback(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
@@ -1993,7 +1122,7 @@ napi_value SetWebRTCAudioCallback(napi_env env, napi_callback_info info) {
             napi_get_global(env, &global);
             
             napi_value result;
-            napi_status status = napi_call_function(env, global, js_callback, 1, &audioInfo, &result);
+            napi_call_function(env, global, js_callback, 1, &audioInfo, &result);
             
             delete[] frameData->samples;
             delete frameData;
@@ -2006,7 +1135,6 @@ napi_value SetWebRTCAudioCallback(napi_env env, napi_callback_info info) {
     return result;
 }
 
-// Инициализация модуля
 napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         {"testMethod", nullptr, TestMethod, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -2016,9 +1144,7 @@ napi_value Init(napi_env env, napi_value exports) {
         {"setCaptureQuality", nullptr, SetCaptureQuality, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setCaptureSource", nullptr, SetCaptureSource, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setWebRTCVideoCallback", nullptr, SetWebRTCVideoCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"setWebRTCAudioCallback", nullptr, SetWebRTCAudioCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"setParticipantsVolume", nullptr, SetParticipantsVolume, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"getParticipantsVolume", nullptr, GetParticipantsVolume, nullptr, nullptr, nullptr, napi_default, nullptr}
+        {"setWebRTCAudioCallback", nullptr, SetWebRTCAudioCallback, nullptr, nullptr, nullptr, napi_default, nullptr}
     };
     
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

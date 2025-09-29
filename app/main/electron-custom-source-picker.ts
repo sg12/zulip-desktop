@@ -189,6 +189,300 @@ export function injectSourcePickerFunction(): string {
 }
 
 /**
+ * Возвращает упрощенный код перехватчика screen share для нативного режима
+ * ВАЖНО: Этот код инжектируется в Jitsi окно и перехватывает вызовы демонстрации экрана
+ */
+export function getSimplifiedScreenShareInterceptorCode(): string {
+    // Импортируем функцию выбора источника
+    const sourcePickerCode = getSourcePickerCode();
+    
+    return `
+        (function() {
+            console.log('[JitsiManager] Installing simplified screen share interceptor...');
+            
+            window.__interceptorFlag = window.__interceptorFlag || false;
+            let pendingSourcesCallback = null;
+            
+            // Предзагрузка источников
+            let cachedSources = null;
+            let cacheTime = 0;
+            const CACHE_DURATION = 5000;
+            
+            async function getElectronSourcesWithCache() {
+                const now = Date.now();
+                if (cachedSources && (now - cacheTime) < CACHE_DURATION) {
+                    console.log('[JitsiManager] Using cached sources');
+                    return cachedSources;
+                }
+                
+                if (window.ipcRenderer) {
+                    cachedSources = await window.ipcRenderer.invoke('get-electron-desktop-sources');
+                    cacheTime = now;
+                    return cachedSources;
+                }
+                return [];
+            }
+            
+            // Предзагружаем источники
+            setTimeout(() => {
+                getElectronSourcesWithCache().then(sources => {
+                    console.log('[JitsiManager] Preloaded', sources.length, 'sources');
+                });
+            }, 1000);
+            
+            // Инжектируем функцию показа выбора источника из модуля
+            ${sourcePickerCode}
+
+            // Мониторинг состояния
+            setInterval(() => {
+                if (window.__interceptorFlag === true) {
+                    return;
+                }
+                
+                if (window.isScreenShareActive) {
+                    let isStillSharing = false;
+                    try {
+                        if (window.APP?.conference?.getLocalTracks) {
+                            const tracks = window.APP.conference.getLocalTracks();
+                            isStillSharing = tracks.some(track => track.videoType === 'desktop');
+                        }
+                    } catch (e) {}
+                    
+                    const hasLiveStream = window.jitsiNativeMediaStream && 
+                                        window.jitsiNativeMediaStream.getTracks().some(t => t.readyState === 'live');
+                    
+                    if (!isStillSharing && !hasLiveStream) {
+                        console.log('[Monitor] Auto-cleanup: no active desktop track or stream');
+                        
+                        window.isScreenShareActive = false;
+                        window.isNativeActive = false;
+                        window.__interceptorFlag = false;
+                        
+                        if (window.jitsiNativeMediaStream) {
+                            window.jitsiNativeMediaStream.getTracks().forEach(track => {
+                                track.stop();
+                            });
+                            window.jitsiNativeMediaStream = null;
+                        }
+                    }
+                }
+            }, 3000);
+            
+            // Ждем загрузки Jitsi API
+            function waitForJitsiAPI() {
+                return new Promise((resolve) => {
+                    if (window.JitsiMeetScreenObtainer?.openDesktopPicker) {
+                        resolve(true);
+                        return;
+                    }
+                    
+                    let attempts = 0;
+                    const checkInterval = setInterval(() => {
+                        attempts++;
+                        if (window.JitsiMeetScreenObtainer?.openDesktopPicker) {
+                            clearInterval(checkInterval);
+                            resolve(true);
+                        } else if (attempts > 100) {
+                            clearInterval(checkInterval);
+                            resolve(false);
+                        }
+                    }, 50);
+                });
+            }
+            
+            waitForJitsiAPI().then(ready => {
+                if (!ready) return;
+                
+                const originalOpenDesktopPicker = window.JitsiMeetScreenObtainer.openDesktopPicker;
+                
+                window.JitsiMeetScreenObtainer.openDesktopPicker = async function(options, callback) {
+                    console.log('[JitsiManager] Desktop picker intercepted - NATIVE MODE ONLY');
+                    
+                    if (window.__interceptorFlag === true) {
+                        console.log('[JitsiManager] Already processing, skipping');
+                        return;
+                    }
+                    
+                    // Проверка на активную демонстрацию
+                    let isAlreadySharing = false;
+                    try {
+                        if (window.APP?.conference?.getLocalTracks) {
+                            const tracks = window.APP.conference.getLocalTracks();
+                            isAlreadySharing = tracks.some(track => track.videoType === 'desktop');
+                        }
+                    } catch (e) {}
+                    
+                    if (isAlreadySharing) {
+                        console.log('[JitsiManager] Already sharing, stopping first');
+                        try {
+                            if (window.APP?.conference?.toggleScreenSharing) {
+                                await window.APP.conference.toggleScreenSharing();
+                                await new Promise(resolve => setTimeout(resolve, 500));
+                            }
+                        } catch (e) {
+                            console.error('[JitsiManager] Error stopping share:', e);
+                        }
+                        
+                        window.isScreenShareActive = false;
+                        window.isNativeActive = false;
+                        window.__interceptorFlag = false;
+                        
+                        if (window.jitsiNativeMediaStream) {
+                            window.jitsiNativeMediaStream.getTracks().forEach(track => track.stop());
+                            window.jitsiNativeMediaStream = null;
+                        }
+                        
+                        console.log('[JitsiManager] Previous share stopped');
+                        return;
+                    }
+                    
+                    window.__interceptorFlag = true;
+
+                    // Сохраняем микрофон
+                    window.__savedMicrophoneTrack = null;
+                    try {
+                        if (window.APP?.conference?.getLocalTracks) {
+                            const tracks = window.APP.conference.getLocalTracks();
+                            const micTrack = tracks.find(t => t.type === 'audio' && t.videoType !== 'desktop');
+                            if (micTrack) {
+                                window.__savedMicrophoneTrack = micTrack;
+                                window.__microphoneMuted = micTrack.isMuted();
+                                console.log('[JitsiManager] Saved microphone track, muted:', window.__microphoneMuted);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[JitsiManager] Could not save microphone:', e);
+                    }
+                    
+                    try {
+                        // СРАЗУ показываем выбор источников (без выбора режима звука)
+                        const sources = await getElectronSourcesWithCache();
+                        
+                        // Используем импортированную функцию showSourcePicker
+                        showSourcePicker(sources, async (selectedId) => {
+                            if (!selectedId) {
+                                window.__interceptorFlag = false;
+                                console.log('[JitsiManager] User cancelled source selection');
+                                return;
+                            }
+                            
+                            try {
+                                // Сохраняем выбранный источник
+                                await window.ipcRenderer.invoke('jitsi:save-selected-source', selectedId);
+                                
+                                // Создаем нативный поток
+                                const streamResult = await window.ipcRenderer.invoke('create-native-stream-for-jitsi');
+                                
+                                if (!streamResult.success) {
+                                    console.error('[JitsiManager] Stream creation failed');
+                                    window.__interceptorFlag = false;
+                                    return;
+                                }
+                                
+                                // Ждем готовности потока
+                                let attempts = 0;
+                                const maxAttempts = 50;
+                                let streamReady = false;
+
+                                while (attempts < maxAttempts) {
+                                    attempts++;
+                                    
+                                    if (window.jitsiNativeMediaStream && 
+                                        window.jitsiNativeMediaStream.getTracks && 
+                                        window.jitsiNativeMediaStream.getTracks().length > 0) {
+                                        
+                                        const tracks = window.jitsiNativeMediaStream.getTracks();
+                                        const allTracksLive = tracks.every(t => t.readyState === 'live');
+                                        
+                                        if (allTracksLive) {
+                                            streamReady = true;
+                                            console.log('[JitsiManager] Stream ready with', tracks.length, 'tracks');
+                                            break;
+                                        }
+                                    }
+                                    
+                                    await new Promise(r => setTimeout(r, 50));
+                                }
+                                
+                                if (!streamReady) {
+                                    console.error('[JitsiManager] Stream timeout after', attempts, 'attempts');
+                                    window.__interceptorFlag = false;
+                                    return;
+                                }
+                                
+                                console.log('[JitsiManager] Native stream confirmed ready');
+                                window.isScreenShareActive = true;
+                                
+                                // Вызываем callback
+                                if (callback) {
+                                    setTimeout(() => {
+                                        console.log('[JitsiManager] Calling Jitsi callback');
+                                        callback('native:' + selectedId, { 
+                                            audio: true, 
+                                            screenShareAudio: true 
+                                        });
+                                        
+                                        setTimeout(() => {
+                                            window.__interceptorFlag = false;
+                                        }, 1000);
+                                    }, 100);
+                                }
+                                
+                                // Восстановление микрофона
+                                setTimeout(async () => {
+                                    window.__interceptorFlag = false;
+                                    
+                                    try {
+                                        const tracks = window.APP.conference.getLocalTracks();
+                                        const hasMic = tracks.some(t => 
+                                            t.type === 'audio' && 
+                                            t.videoType !== 'desktop'
+                                        );
+                                        
+                                        if (!hasMic) {
+                                            console.log('[JitsiManager] Microphone missing, creating new...');
+                                            
+                                            const audioTracks = await window.JitsiMeetJS.createLocalTracks({
+                                                devices: ['audio']
+                                            });
+                                            
+                                            if (audioTracks && audioTracks[0]) {
+                                                await window.APP.conference.addTrack(audioTracks[0]);
+                                                
+                                                if (window.__microphoneMuted) {
+                                                    await audioTracks[0].mute();
+                                                }
+                                                
+                                                console.log('[JitsiManager] New microphone added');
+                                            }
+                                        }
+                                    } catch (e) {
+                                        console.error('[JitsiManager] Error checking/restoring mic:', e);
+                                    }
+                                    
+                                    window.__savedMicrophoneTrack = null;
+                                    window.__microphoneMuted = null;
+                                }, 3000);
+                                
+                            } catch (error) {
+                                console.error('[JitsiManager] Error in native mode:', error);
+                                window.__interceptorFlag = false;
+                            }
+                        });
+                        
+                    } catch (error) {
+                        console.error('[JitsiManager] Error in picker:', error);
+                        window.__interceptorFlag = false;
+                    }
+                };
+            });
+            
+            return { success: true };
+        })();
+    `;
+}
+
+/**
  * Логирование для отладки
  */
 export function logSourcePickerEvent(event: string, data?: any): void {
