@@ -5,6 +5,7 @@
 #include <dxgi1_2.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
+#include <endpointvolume.h>
 #include <audiopolicy.h>
 #include <thread>
 #include <atomic>
@@ -410,15 +411,8 @@ public:
                             float masterVolume = 0.0f;
                             simpleVolume->GetMasterVolume(&masterVolume);
                             
-                            IAudioMeterInformation* meterInfo = nullptr;
-                            hr = sessionControl->QueryInterface(__uuidof(IAudioMeterInformation), (void**)&meterInfo);
-                            
-                            if (SUCCEEDED(hr)) {
-                                float peakValue = 0.0f;
-                                meterInfo->GetPeakValue(&peakValue);
-                                maxVolume = peakValue * masterVolume;
-                                meterInfo->Release();
-                            }
+                            // Simplified: just use the master volume
+                            maxVolume = masterVolume;
                             
                             simpleVolume->Release();
                         }
@@ -575,9 +569,10 @@ public:
         } else if (waveFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
             WAVEFORMATEXTENSIBLE* pWaveFormatExt = (WAVEFORMATEXTENSIBLE*)waveFormat;
             
-            static const GUID KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = 
+            // Define GUIDs inline to avoid compilation issues
+            const GUID KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = 
                 {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
-            static const GUID KSDATAFORMAT_SUBTYPE_PCM = 
+            const GUID KSDATAFORMAT_SUBTYPE_PCM = 
                 {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
             
             if (IsEqualGUID(pWaveFormatExt->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
