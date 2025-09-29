@@ -43,6 +43,21 @@
 #define WAVE_FORMAT_PCM 0x0001
 #endif
 
+// GUID definitions for audio formats - must be defined at compile time
+#ifdef _MSC_VER
+// For MSVC compiler
+static const GUID LOCAL_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = 
+    {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+static const GUID LOCAL_KSDATAFORMAT_SUBTYPE_PCM = 
+    {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+#else
+// For other compilers
+const GUID LOCAL_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = 
+    {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+const GUID LOCAL_KSDATAFORMAT_SUBTYPE_PCM = 
+    {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+#endif
+
 // Global callbacks
 static napi_threadsafe_function g_video_tsfn = nullptr;
 static napi_threadsafe_function g_audio_tsfn = nullptr;
@@ -569,18 +584,12 @@ public:
         } else if (waveFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
             WAVEFORMATEXTENSIBLE* pWaveFormatExt = (WAVEFORMATEXTENSIBLE*)waveFormat;
             
-            // Define GUIDs inline to avoid compilation issues
-            const GUID KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = 
-                {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
-            const GUID KSDATAFORMAT_SUBTYPE_PCM = 
-                {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
-            
-            if (IsEqualGUID(pWaveFormatExt->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
+            if (IsEqualGUID(pWaveFormatExt->SubFormat, LOCAL_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
                 float* srcFloat = (float*)data;
                 for (size_t i = 0; i < sampleCount; i++) {
                     samples[i] = srcFloat[i];
                 }
-            } else if (IsEqualGUID(pWaveFormatExt->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)) {
+            } else if (IsEqualGUID(pWaveFormatExt->SubFormat, LOCAL_KSDATAFORMAT_SUBTYPE_PCM)) {
                 if (waveFormat->wBitsPerSample == 16) {
                     INT16* src = (INT16*)data;
                     for (size_t i = 0; i < sampleCount; i++) {
