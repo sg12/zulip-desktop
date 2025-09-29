@@ -7,6 +7,7 @@
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <audiopolicy.h>
+#include <propvarutil.h>
 #include <thread>
 #include <atomic>
 #include <vector>
@@ -26,6 +27,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "propsys.lib")
 
 #ifndef DWMWA_CLOAKED
 #define DWMWA_CLOAKED 14
@@ -43,18 +45,32 @@
 #define WAVE_FORMAT_PCM 0x0001
 #endif
 
-// GUID definitions for audio formats - must be defined at compile time
+// Windows 11 22H2+ Process Loopback API definitions
+// We define these manually to avoid SDK dependency
+enum AUDIOCLIENT_ACTIVATION_TYPE {
+    AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT = 0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
+};
+
+enum PROCESS_LOOPBACK_MODE {
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE = 1
+};
+
+struct AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+    DWORD ProcessId;
+    PROCESS_LOOPBACK_MODE ProcessLoopbackMode;
+};
+
+// GUID for process loopback activation
+const GUID VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK = 
+    {0x8e7dbf85, 0xadb1, 0x41f0, {0x8f, 0x0a, 0xbc, 0xb7, 0xc5, 0xd8, 0x8e, 0xf9}};
+
+// GUID definitions for audio formats
 #ifdef _MSC_VER
-// For MSVC compiler
 static const GUID LOCAL_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = 
     {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 static const GUID LOCAL_KSDATAFORMAT_SUBTYPE_PCM = 
-    {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
-#else
-// For other compilers
-const GUID LOCAL_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = 
-    {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
-const GUID LOCAL_KSDATAFORMAT_SUBTYPE_PCM = 
     {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 #endif
 
@@ -257,7 +273,7 @@ public:
     }
 };
 
-// Audio capture with application filtering
+// Advanced audio capture with Windows 11 process isolation support
 class ApplicationAudioCapture {
 private:
     DWORD targetProcessId = 0;
@@ -278,7 +294,10 @@ private:
     LARGE_INTEGER performanceFrequency;
     LARGE_INTEGER captureStartTime;
     
-    // For application-specific volume tracking
+    // Track if we're using process-specific capture
+    bool useProcessLoopback = false;
+    
+    // For application-specific volume tracking (fallback mode)
     std::atomic<float> targetProcessVolume{0.0f};
     std::atomic<bool> isTargetProcessActive{false};
     
@@ -328,28 +347,153 @@ public:
         
         if (FAILED(hr)) return false;
         
-        // Get session manager for monitoring
-        hr = device->Activate(
-            __uuidof(IAudioSessionManager2),
-            CLSCTX_ALL,
-            nullptr,
-            (void**)&sessionManager
+        // Try Windows 11 process-specific loopback first
+        bool processLoopbackSucceeded = TryInitializeProcessLoopback();
+        
+        if (!processLoopbackSucceeded) {
+            // Fallback to standard loopback with filtering
+            OutputDebugStringA("Process loopback not available, using standard loopback\n");
+            
+            // Get session manager for monitoring
+            hr = device->Activate(
+                __uuidof(IAudioSessionManager2),
+                CLSCTX_ALL,
+                nullptr,
+                (void**)&sessionManager
+            );
+            
+            if (FAILED(hr)) return false;
+            
+            hr = InitializeStandardLoopback();
+            if (FAILED(hr)) return false;
+        }
+        
+        hr = audioClient->GetService(
+            __uuidof(IAudioCaptureClient),
+            (void**)&captureClient
         );
         
-        if (FAILED(hr)) return false;
+        if (SUCCEEDED(hr) && !useProcessLoopback) {
+            StartSessionMonitoring();
+        }
         
-        // Initialize audio client with loopback
-        hr = device->Activate(
+        return SUCCEEDED(hr);
+    }
+    
+    bool TryInitializeProcessLoopback() {
+        // Check Windows version first
+        OSVERSIONINFOEXW osvi = { sizeof(osvi), 0, 0, 0, 0, {0}, 0, 0 };
+        DWORDLONG const dwlConditionMask = VerSetConditionMask(
+            VerSetConditionMask(
+                VerSetConditionMask(0, VER_MAJORVERSION, VER_GREATER_EQUAL),
+                VER_MINORVERSION, VER_GREATER_EQUAL),
+            VER_BUILDNUMBER, VER_GREATER_EQUAL);
+        
+        osvi.dwMajorVersion = 10;
+        osvi.dwMinorVersion = 0;
+        osvi.dwBuildNumber = 22621; // Windows 11 22H2
+        
+        if (!VerifyVersionInfoW(&osvi, VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER, dwlConditionMask)) {
+            OutputDebugStringA("Windows version too old for process loopback\n");
+            return false;
+        }
+        
+        // Try to activate with process loopback parameters
+        AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS loopbackParams = {};
+        loopbackParams.ProcessId = targetProcessId;
+        loopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+        
+        // Create activation parameters
+        PROPVARIANT activateParams;
+        PropVariantInit(&activateParams);
+        activateParams.vt = VT_BLOB;
+        activateParams.blob.cbSize = sizeof(AUDIOCLIENT_ACTIVATION_TYPE) + sizeof(AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS);
+        activateParams.blob.pBlobData = (BYTE*)CoTaskMemAlloc(activateParams.blob.cbSize);
+        
+        if (!activateParams.blob.pBlobData) {
+            return false;
+        }
+        
+        // Fill activation parameters
+        AUDIOCLIENT_ACTIVATION_TYPE* pActivationType = (AUDIOCLIENT_ACTIVATION_TYPE*)activateParams.blob.pBlobData;
+        *pActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+        
+        AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS* pLoopbackParams = 
+            (AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS*)(activateParams.blob.pBlobData + sizeof(AUDIOCLIENT_ACTIVATION_TYPE));
+        *pLoopbackParams = loopbackParams;
+        
+        // Try to activate with process loopback
+        HRESULT hr = device->Activate(
+            __uuidof(IAudioClient),
+            CLSCTX_ALL,
+            &activateParams,
+            (void**)&audioClient
+        );
+        
+        // Clean up activation parameters
+        CoTaskMemFree(activateParams.blob.pBlobData);
+        PropVariantClear(&activateParams);
+        
+        if (FAILED(hr)) {
+            char log[256];
+            sprintf_s(log, "Process loopback activation failed: 0x%08X\n", hr);
+            OutputDebugStringA(log);
+            
+            // Clean up if activation failed
+            if (audioClient) {
+                audioClient->Release();
+                audioClient = nullptr;
+            }
+            return false;
+        }
+        
+        // Initialize the audio client
+        hr = audioClient->GetMixFormat(&waveFormat);
+        if (FAILED(hr)) {
+            audioClient->Release();
+            audioClient = nullptr;
+            return false;
+        }
+        
+        hr = audioClient->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            0, // No additional flags needed
+            20000000,
+            0,
+            waveFormat,
+            nullptr
+        );
+        
+        if (SUCCEEDED(hr)) {
+            useProcessLoopback = true;
+            OutputDebugStringA("SUCCESS: Process-specific loopback initialized! Capturing ONLY target application audio.\n");
+            return true;
+        }
+        
+        // Clean up on failure
+        audioClient->Release();
+        audioClient = nullptr;
+        if (waveFormat) {
+            CoTaskMemFree(waveFormat);
+            waveFormat = nullptr;
+        }
+        
+        return false;
+    }
+    
+    HRESULT InitializeStandardLoopback() {
+        // Standard loopback initialization
+        HRESULT hr = device->Activate(
             __uuidof(IAudioClient),
             CLSCTX_ALL,
             nullptr,
             (void**)&audioClient
         );
         
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) return hr;
         
         hr = audioClient->GetMixFormat(&waveFormat);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) return hr;
         
         hr = audioClient->Initialize(
             AUDCLNT_SHAREMODE_SHARED,
@@ -360,19 +504,7 @@ public:
             nullptr
         );
         
-        if (FAILED(hr)) return false;
-        
-        hr = audioClient->GetService(
-            __uuidof(IAudioCaptureClient),
-            (void**)&captureClient
-        );
-        
-        if (SUCCEEDED(hr)) {
-            StartSessionMonitoring();
-            OutputDebugStringA("Application audio capture initialized\n");
-        }
-        
-        return SUCCEEDED(hr);
+        return hr;
     }
     
     void StartSessionMonitoring() {
@@ -425,10 +557,7 @@ public:
                         if (SUCCEEDED(hr)) {
                             float masterVolume = 0.0f;
                             simpleVolume->GetMasterVolume(&masterVolume);
-                            
-                            // Simplified: just use the master volume
                             maxVolume = masterVolume;
-                            
                             simpleVolume->Release();
                         }
                         
@@ -472,27 +601,7 @@ public:
         
         if (FAILED(hr)) return false;
         
-        hr = device->Activate(
-            __uuidof(IAudioClient),
-            CLSCTX_ALL,
-            nullptr,
-            (void**)&audioClient
-        );
-        
-        if (FAILED(hr)) return false;
-        
-        hr = audioClient->GetMixFormat(&waveFormat);
-        if (FAILED(hr)) return false;
-        
-        hr = audioClient->Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
-            20000000,
-            0,
-            waveFormat,
-            nullptr
-        );
-        
+        hr = InitializeStandardLoopback();
         if (FAILED(hr)) return false;
         
         hr = audioClient->GetService(
@@ -522,7 +631,12 @@ public:
                 CaptureLoop();
                 CoUninitialize();
             });
-            OutputDebugStringA("Audio capture started\n");
+            
+            if (useProcessLoopback) {
+                OutputDebugStringA("Audio capture started - PROCESS ISOLATION MODE\n");
+            } else {
+                OutputDebugStringA("Audio capture started - STANDARD MODE with filtering\n");
+            }
         }
     }
     
@@ -611,8 +725,8 @@ public:
             }
         }
         
-        // Apply process filtering if enabled
-        if (targetProcessId != 0) {
+        // Apply process filtering only if NOT using process loopback
+        if (!useProcessLoopback && targetProcessId != 0) {
             ApplyProcessFilter(samples);
         }
         
@@ -659,12 +773,19 @@ public:
             frameData->sampleRate = waveFormat->nSamplesPerSec;
             frameData->channels = waveFormat->nChannels;
             frameData->timestamp = g_syncManager.GetAudioTimestamp();
-            frameData->isSystemAudio = (targetProcessId == 0);
+            frameData->isSystemAudio = !useProcessLoopback;
             
             if (!applicationName.empty()) {
                 char appName[256] = {0};
                 wcstombs(appName, applicationName.c_str(), sizeof(appName) - 1);
                 frameData->applicationName = appName;
+                
+                // Add indicator of capture mode
+                if (useProcessLoopback) {
+                    frameData->applicationName += " [ISOLATED]";
+                } else {
+                    frameData->applicationName += " [FILTERED]";
+                }
             }
             
             size_t frameSampleCount = TARGET_FRAME_SIZE * waveFormat->nChannels;
@@ -807,7 +928,7 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
 
 napi_value TestMethod(napi_env env, napi_callback_info info) {
     napi_value result;
-    napi_create_string_utf8(env, "Windows Audio Capture Module v2.0 - Application Filtering", NAPI_AUTO_LENGTH, &result);
+    napi_create_string_utf8(env, "Windows Audio Capture Module v3.0 - Process Isolation Support", NAPI_AUTO_LENGTH, &result);
     return result;
 }
 
@@ -992,7 +1113,7 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
         }
     }
     
-    // Start audio capture with application filtering support
+    // Start audio capture with process isolation support
     if (g_currentSource.type == "window") {
         try {
             HWND hwnd = (HWND)std::stoull(g_currentSource.id);
@@ -1003,7 +1124,7 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
                 if (g_appAudioCapture->InitializeForApplication(hwnd)) {
                     g_appAudioCapture->StartCapture();
                     audioStarted = true;
-                    OutputDebugStringA("Started application-specific audio capture with filtering\n");
+                    OutputDebugStringA("Started application audio capture\n");
                 } else {
                     // Fallback to system audio
                     if (g_appAudioCapture->InitializeForSystemAudio()) {
@@ -1037,7 +1158,7 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
     napi_value message;
     std::string msg = "Started: ";
     if (videoStarted) msg += "video ";
-    if (audioStarted) msg += "audio (with app filtering)";
+    if (audioStarted) msg += "audio";
     napi_create_string_utf8(env, msg.c_str(), NAPI_AUTO_LENGTH, &message);
     napi_set_named_property(env, result, "message", message);
     
