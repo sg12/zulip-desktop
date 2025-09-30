@@ -51,7 +51,6 @@
 #endif
 
 // Windows 11 22H2+ Process Loopback API definitions
-// We define these manually to avoid SDK dependency
 enum AUDIOCLIENT_ACTIVATION_TYPE {
     AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT = 0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
@@ -302,8 +301,8 @@ private:
     // Track if we're using process-specific capture
     bool useProcessLoopback = false;
     
-    // TEST MODE: Use synthetic clicks if process loopback fails
-    bool useTestMode = false;
+    // SAFE FALLBACK: Use synthetic clicks if ANY failure
+    bool useSafeMode = false;
     
     // For test mode click generation
     double clickPhase = 0.0;
@@ -355,8 +354,8 @@ public:
         );
         
         if (FAILED(hr)) {
-            OutputDebugStringA("TEST MODE: Failed to create MMDeviceEnumerator, using test clicks\n");
-            useTestMode = true;
+            OutputDebugStringA("SAFE MODE: Failed to create MMDeviceEnumerator, using safe clicks\n");
+            useSafeMode = true;
             return true;
         }
         
@@ -367,8 +366,8 @@ public:
         );
         
         if (FAILED(hr)) {
-            OutputDebugStringA("TEST MODE: Failed to get default audio endpoint, using test clicks\n");
-            useTestMode = true;
+            OutputDebugStringA("SAFE MODE: Failed to get default audio endpoint, using safe clicks\n");
+            useSafeMode = true;
             return true;
         }
         
@@ -376,12 +375,12 @@ public:
         bool processLoopbackSucceeded = TryInitializeProcessLoopback();
         
         if (!processLoopbackSucceeded) {
-            // Instead of fallback to standard loopback, use test mode
+            // DO NOT fallback to standard loopback - use safe mode instead
             OutputDebugStringA("IMPORTANT: Process loopback not available!\n");
-            OutputDebugStringA("TEST MODE: Switching to synthetic clicks to avoid echo\n");
-            useTestMode = true;
+            OutputDebugStringA("SAFE MODE: Using synthetic clicks to avoid echo/feedback\n");
+            useSafeMode = true;
             
-            // Clean up audio resources since we're using test mode
+            // Clean up audio resources since we're using safe mode
             if (audioClient) {
                 audioClient->Release();
                 audioClient = nullptr;
@@ -404,7 +403,18 @@ public:
             (void**)&captureClient
         );
         
-        return SUCCEEDED(hr);
+        if (FAILED(hr)) {
+            OutputDebugStringA("SAFE MODE: Failed to get capture client, using safe clicks\n");
+            useSafeMode = true;
+            
+            // Clean up
+            if (audioClient) {
+                audioClient->Release();
+                audioClient = nullptr;
+            }
+        }
+        
+        return true;
     }
     
     bool TryInitializeProcessLoopback() {
@@ -438,6 +448,7 @@ public:
         activateParams.blob.pBlobData = (BYTE*)CoTaskMemAlloc(activateParams.blob.cbSize);
         
         if (!activateParams.blob.pBlobData) {
+            OutputDebugStringA("Failed to allocate memory for process loopback params\n");
             return false;
         }
         
@@ -457,14 +468,17 @@ public:
             (void**)&audioClient
         );
         
-        // Clean up activation parameters
-        CoTaskMemFree(activateParams.blob.pBlobData);
-        PropVariantClear(&activateParams);
+        // CRITICAL FIX: DO NOT free memory here if succeeded!
+        // Windows may still be using these parameters
         
         if (FAILED(hr)) {
             char log[256];
             sprintf_s(log, "Process loopback activation failed: 0x%08X\n", hr);
             OutputDebugStringA(log);
+            
+            // Free memory only on failure
+            CoTaskMemFree(activateParams.blob.pBlobData);
+            PropVariantClear(&activateParams);
             
             // Clean up if activation failed
             if (audioClient) {
@@ -477,6 +491,12 @@ public:
         // Initialize the audio client
         hr = audioClient->GetMixFormat(&waveFormat);
         if (FAILED(hr)) {
+            OutputDebugStringA("Failed to get mix format for process loopback\n");
+            
+            // Free memory on failure
+            CoTaskMemFree(activateParams.blob.pBlobData);
+            PropVariantClear(&activateParams);
+            
             audioClient->Release();
             audioClient = nullptr;
             return false;
@@ -484,12 +504,16 @@ public:
         
         hr = audioClient->Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            0, // No additional flags needed
+            0, // No additional flags needed for process loopback
             20000000,
             0,
             waveFormat,
             nullptr
         );
+        
+        // NOW we can free the activation parameters after Initialize
+        CoTaskMemFree(activateParams.blob.pBlobData);
+        PropVariantClear(&activateParams);
         
         if (SUCCEEDED(hr)) {
             useProcessLoopback = true;
@@ -498,6 +522,7 @@ public:
         }
         
         // Clean up on failure
+        OutputDebugStringA("Process loopback initialization failed\n");
         audioClient->Release();
         audioClient = nullptr;
         if (waveFormat) {
@@ -508,154 +533,38 @@ public:
         return false;
     }
     
-    HRESULT InitializeStandardLoopback() {
-        // Standard loopback initialization
-        HRESULT hr = device->Activate(
-            __uuidof(IAudioClient),
-            CLSCTX_ALL,
-            nullptr,
-            (void**)&audioClient
-        );
-        
-        if (FAILED(hr)) return hr;
-        
-        hr = audioClient->GetMixFormat(&waveFormat);
-        if (FAILED(hr)) return hr;
-        
-        hr = audioClient->Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
-            20000000,
-            0,
-            waveFormat,
-            nullptr
-        );
-        
-        return hr;
-    }
-    
-    void StartSessionMonitoring() {
-        std::thread monitorThread([this]() {
-            CoInitialize(nullptr);
-            
-            while (isCapturing) {
-                UpdateTargetProcessVolume();
-                Sleep(100);
-            }
-            
-            CoUninitialize();
-        });
-        monitorThread.detach();
-    }
-    
-    void UpdateTargetProcessVolume() {
-        if (!sessionManager) return;
-        
-        IAudioSessionEnumerator* sessionEnumerator = nullptr;
-        HRESULT hr = sessionManager->GetSessionEnumerator(&sessionEnumerator);
-        if (FAILED(hr)) return;
-        
-        int sessionCount = 0;
-        sessionEnumerator->GetCount(&sessionCount);
-        
-        bool foundTarget = false;
-        float maxVolume = 0.0f;
-        
-        for (int i = 0; i < sessionCount; i++) {
-            IAudioSessionControl* sessionControl = nullptr;
-            hr = sessionEnumerator->GetSession(i, &sessionControl);
-            if (FAILED(hr)) continue;
-            
-            IAudioSessionControl2* sessionControl2 = nullptr;
-            hr = sessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&sessionControl2);
-            
-            if (SUCCEEDED(hr)) {
-                DWORD processId = 0;
-                hr = sessionControl2->GetProcessId(&processId);
-                
-                if (SUCCEEDED(hr) && processId == targetProcessId) {
-                    AudioSessionState state;
-                    hr = sessionControl->GetState(&state);
-                    
-                    if (SUCCEEDED(hr) && state == AudioSessionStateActive) {
-                        ISimpleAudioVolume* simpleVolume = nullptr;
-                        hr = sessionControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&simpleVolume);
-                        
-                        if (SUCCEEDED(hr)) {
-                            float masterVolume = 0.0f;
-                            simpleVolume->GetMasterVolume(&masterVolume);
-                            maxVolume = masterVolume;
-                            simpleVolume->Release();
-                        }
-                        
-                        foundTarget = true;
-                    }
-                }
-                
-                sessionControl2->Release();
-            }
-            
-            sessionControl->Release();
-        }
-        
-        targetProcessVolume = maxVolume;
-        isTargetProcessActive = foundTarget;
-        
-        sessionEnumerator->Release();
-    }
-    
     bool InitializeForSystemAudio() {
         CoInitialize(nullptr);
         
         QueryPerformanceFrequency(&performanceFrequency);
         QueryPerformanceCounter(&captureStartTime);
         
-        HRESULT hr = CoCreateInstance(
-            __uuidof(MMDeviceEnumerator),
-            nullptr,
-            CLSCTX_ALL,
-            __uuidof(IMMDeviceEnumerator),
-            (void**)&deviceEnumerator
-        );
-        
-        if (FAILED(hr)) return false;
-        
-        hr = deviceEnumerator->GetDefaultAudioEndpoint(
-            eRender,
-            eConsole,
-            &device
-        );
-        
-        if (FAILED(hr)) return false;
-        
-        hr = InitializeStandardLoopback();
-        if (FAILED(hr)) return false;
-        
-        hr = audioClient->GetService(
-            __uuidof(IAudioCaptureClient),
-            (void**)&captureClient
-        );
-        
-        return SUCCEEDED(hr);
+        // For system audio, we ALWAYS use safe mode to avoid echo
+        OutputDebugStringA("SAFE MODE: System audio uses synthetic clicks to avoid echo\n");
+        useSafeMode = true;
+        return true;
     }
     
     void StartCapture() {
-        if (!useTestMode && !audioClient) return;
+        if (!useSafeMode && !audioClient) {
+            OutputDebugStringA("ERROR: No audio client available, switching to safe mode\n");
+            useSafeMode = true;
+        }
         
         isCapturing = true;
         
-        if (useTestMode) {
-            // Test mode - initialize click generation
+        if (useSafeMode) {
+            // Safe mode - initialize click generation
             lastClickTime = 0.0;
             clickPhase = 0.0;
             
             captureThread = std::thread([this]() {
                 CoInitialize(nullptr);
-                GenerateTestClickLoop();
+                GenerateSafeClickLoop();
                 CoUninitialize();
             });
             
-            OutputDebugStringA("TEST MODE: Started synthetic click generation\n");
+            OutputDebugStringA("SAFE MODE: Started synthetic click generation\n");
         } else {
             // Real audio capture mode
             {
@@ -676,13 +585,22 @@ public:
                 if (useProcessLoopback) {
                     OutputDebugStringA("Audio capture started - PROCESS ISOLATION MODE (REAL AUDIO)\n");
                 } else {
-                    OutputDebugStringA("Audio capture started - STANDARD MODE with filtering\n");
+                    OutputDebugStringA("Audio capture started - UNEXPECTED MODE\n");
                 }
+            } else {
+                OutputDebugStringA("ERROR: Failed to start audio client, switching to safe mode\n");
+                useSafeMode = true;
+                
+                captureThread = std::thread([this]() {
+                    CoInitialize(nullptr);
+                    GenerateSafeClickLoop();
+                    CoUninitialize();
+                });
             }
         }
     }
     
-    void GenerateTestClickLoop() {
+    void GenerateSafeClickLoop() {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         
         while (isCapturing) {
@@ -691,15 +609,15 @@ public:
             frameData->sampleRate = TEST_SAMPLE_RATE;
             frameData->channels = TEST_CHANNELS;
             frameData->timestamp = g_syncManager.GetAudioTimestamp();
-            frameData->isSystemAudio = false; // It's test audio
+            frameData->isSystemAudio = false;
             
             if (!applicationName.empty()) {
                 char appName[256] = {0};
                 wcstombs(appName, applicationName.c_str(), sizeof(appName) - 1);
                 frameData->applicationName = appName;
-                frameData->applicationName += " [TEST CLICKS - Process Loopback Failed]";
+                frameData->applicationName += " [SAFE MODE - Clicks Only]";
             } else {
-                frameData->applicationName = "System [TEST CLICKS]";
+                frameData->applicationName = "System [SAFE MODE - Clicks Only]";
             }
             
             // Allocate and generate samples
@@ -776,7 +694,17 @@ public:
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         
         // This function is only called for real audio capture
-        if (useTestMode) return;
+        if (useSafeMode) {
+            OutputDebugStringA("WARNING: CaptureLoop called in safe mode, switching to clicks\n");
+            GenerateSafeClickLoop();
+            return;
+        }
+        
+        if (!captureClient) {
+            OutputDebugStringA("ERROR: No capture client in CaptureLoop, switching to safe mode\n");
+            GenerateSafeClickLoop();
+            return;
+        }
         
         while (isCapturing) {
             UINT32 packetLength = 0;
@@ -801,6 +729,8 @@ public:
                     }
                     
                     captureClient->ReleaseBuffer(numFramesAvailable);
+                } else {
+                    OutputDebugStringA("ERROR: GetBuffer failed, continuing...\n");
                 }
             } else {
                 Sleep(2);
@@ -809,6 +739,11 @@ public:
     }
     
     void ProcessAudioData(BYTE* data, UINT32 numFrames) {
+        if (!waveFormat) {
+            OutputDebugStringA("ERROR: No wave format in ProcessAudioData\n");
+            return;
+        }
+        
         size_t sampleCount = numFrames * waveFormat->nChannels;
         std::vector<float> samples(sampleCount);
         
@@ -860,9 +795,9 @@ public:
             }
         }
         
-        // Apply process filtering only if NOT using process loopback
-        if (!useProcessLoopback && targetProcessId != 0) {
-            ApplyProcessFilter(samples);
+        // NO filtering if using process loopback - it's already isolated
+        if (!useProcessLoopback) {
+            OutputDebugStringA("WARNING: Processing audio without process isolation!\n");
         }
         
         // Add to buffer
@@ -875,28 +810,14 @@ public:
         SendBufferedFrames();
     }
     
-    void ApplyProcessFilter(std::vector<float>& samples) {
-        // Simple filtering based on process activity
-        if (!isTargetProcessActive) {
-            // Reduce volume significantly when target process is not active
-            for (auto& sample : samples) {
-                sample *= 0.1f;
-            }
-        } else {
-            // Apply volume-based filtering
-            float volume = targetProcessVolume.load();
-            if (volume < 0.1f) {
-                // Process is active but quiet, reduce noise
-                for (auto& sample : samples) {
-                    sample *= 0.3f;
-                }
-            }
-        }
-    }
-    
     void SendBufferedFrames() {
         while (true) {
             std::unique_lock<std::mutex> lock(bufferMutex);
+            
+            if (!waveFormat) {
+                OutputDebugStringA("ERROR: No wave format in SendBufferedFrames\n");
+                break;
+            }
             
             size_t samplesPerChannel = accumulationBuffer.size() / waveFormat->nChannels;
             if (samplesPerChannel < TARGET_FRAME_SIZE) {
@@ -917,9 +838,9 @@ public:
                 
                 // Add indicator of capture mode
                 if (useProcessLoopback) {
-                    frameData->applicationName += " [ISOLATED]";
+                    frameData->applicationName += " [ISOLATED PROCESS AUDIO]";
                 } else {
-                    frameData->applicationName += " [FILTERED]";
+                    frameData->applicationName += " [WARNING: UNFILTERED]";
                 }
             }
             
@@ -959,7 +880,7 @@ public:
     void StopCapture() {
         isCapturing = false;
         
-        if (!useTestMode && audioClient) {
+        if (!useSafeMode && audioClient) {
             audioClient->Stop();
         }
         
@@ -967,13 +888,13 @@ public:
             captureThread.join();
         }
         
-        if (!useTestMode) {
+        if (!useSafeMode) {
             std::lock_guard<std::mutex> lock(bufferMutex);
             accumulationBuffer.clear();
         }
         
-        if (useTestMode) {
-            OutputDebugStringA("TEST MODE: Stopped synthetic click generation\n");
+        if (useSafeMode) {
+            OutputDebugStringA("SAFE MODE: Stopped synthetic click generation\n");
         } else {
             OutputDebugStringA("Audio capture stopped\n");
         }
@@ -1067,7 +988,7 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
 
 napi_value TestMethod(napi_env env, napi_callback_info info) {
     napi_value result;
-    napi_create_string_utf8(env, "Windows Audio Capture Module v3.0 - Process Isolation Support (Hybrid Mode)", NAPI_AUTO_LENGTH, &result);
+    napi_create_string_utf8(env, "Windows Audio Capture Module v4.0 - Safe Mode with Process Isolation", NAPI_AUTO_LENGTH, &result);
     return result;
 }
 
@@ -1264,24 +1185,18 @@ napi_value StartCapture(napi_env env, napi_callback_info info) {
                     g_appAudioCapture->StartCapture();
                     audioStarted = true;
                     OutputDebugStringA("Started application audio capture\n");
-                } else {
-                    // Fallback to system audio
-                    if (g_appAudioCapture->InitializeForSystemAudio()) {
-                        g_appAudioCapture->StartCapture();
-                        audioStarted = true;
-                        OutputDebugStringA("Fallback to system audio capture\n");
-                    }
                 }
             }
         } catch (...) {
             OutputDebugStringA("Exception in window audio capture\n");
         }
     } else {
+        // For screen capture, use safe mode to avoid echo
         g_appAudioCapture = std::make_unique<ApplicationAudioCapture>();
         if (g_appAudioCapture->InitializeForSystemAudio()) {
             g_appAudioCapture->StartCapture();
             audioStarted = true;
-            OutputDebugStringA("Started system audio capture\n");
+            OutputDebugStringA("Started safe mode audio for screen capture\n");
         }
     }
     
