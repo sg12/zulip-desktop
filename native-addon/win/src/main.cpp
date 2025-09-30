@@ -231,6 +231,11 @@ public:
     }
 };
 
+// Define PI constant for MSVC
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 // TEST: Synthetic click sound generator instead of real audio capture
 class ApplicationAudioCapture {
 private:
