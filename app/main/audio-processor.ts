@@ -299,81 +299,6 @@ export function getRingBufferCode(): string {
     `;
 }
 
-/**
- * Возвращает код класса ParticipantAudioMixer для инжекции в Jitsi окно
- */
-export function getParticipantAudioMixerCode(): string {
-    return `
-        class ParticipantAudioMixer {
-            constructor(sampleRate = 48000) {
-                this.sampleRate = sampleRate;
-                this.participants = new Map();
-                this.mixBuffer = new Float32Array(2048);
-            }
-            
-            addParticipantAudio(participantId, audioData) {
-                if (!this.participants.has(participantId)) {
-                    this.participants.set(participantId, {
-                        buffer: new RingBuffer(this.sampleRate),
-                        volume: 1.0,
-                        muted: false
-                    });
-                }
-                
-                const participant = this.participants.get(participantId);
-                participant.buffer.write(audioData);
-            }
-            
-            getMixedOutput(outputSize = 2048) {
-                const output = new Float32Array(outputSize);
-                
-                // Микшируем все голоса участников
-                this.participants.forEach(participant => {
-                    if (!participant.muted && participant.buffer.availableSamples > 0) {
-                        const temp = new Float32Array(outputSize);
-                        participant.buffer.read(temp);
-                        
-                        for (let i = 0; i < outputSize; i++) {
-                            output[i] += temp[i] * participant.volume;
-                        }
-                    }
-                });
-                
-                // Нормализация чтобы избежать клиппинга
-                const maxVal = Math.max(...output.map(Math.abs));
-                if (maxVal > 1.0) {
-                    const scale = 0.95 / maxVal;
-                    for (let i = 0; i < output.length; i++) {
-                        output[i] *= scale;
-                    }
-                }
-                
-                return output;
-            }
-            
-            setParticipantVolume(participantId, volume) {
-                if (this.participants.has(participantId)) {
-                    this.participants.get(participantId).volume = volume;
-                }
-            }
-            
-            muteParticipant(participantId, muted) {
-                if (this.participants.has(participantId)) {
-                    this.participants.get(participantId).muted = muted;
-                }
-            }
-            
-            clear() {
-                this.participants.forEach(participant => {
-                    if (participant.buffer && participant.buffer.clear) {
-                        participant.buffer.clear();
-                    }
-                });
-                this.participants.clear();
-            }
-        }
-    `;
-}
 
 /**
  * Генерирует код для отправки аудио данных в буферы Jitsi
@@ -408,17 +333,6 @@ export function getSendAudioToJitsiCode(leftData: Float32Array, rightData: Float
                 let maxAmp = 0;
                 for (let i = 0; i < Math.min(100, leftData.length); i++) {
                     maxAmp = Math.max(maxAmp, Math.abs(leftData[i]), Math.abs(rightData[i]));
-                }
-                
-                // НОВОЕ: Микшируем голоса участников если есть
-                if (window.participantAudioMixer && window.audioRoutingMode === 'presenter_mix') {
-                    const participantMix = window.participantAudioMixer.getMixedOutput(${samples});
-                    
-                    // Микшируем с системным звуком
-                    for (let i = 0; i < ${samples}; i++) {
-                        leftData[i] = leftData[i] * 0.7 + participantMix[i] * 0.3;
-                        rightData[i] = rightData[i] * 0.7 + participantMix[i] * 0.3;
-                    }
                 }
                 
                 // Записываем в буферы как обычно
