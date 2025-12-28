@@ -41,7 +41,8 @@ import { ipcMain, send } from "./typed-ipc-main.js";
 const { setupScreenSharingMain } = require('@jitsi/electron-sdk');
 
 import { NativeCaptureManager } from './native-capture';
-import { JitsiNativeManager } from './jitsi-native-manager';
+// import { JitsiNativeManager } from './jitsi-native-manager';
+import { JitsiNativeManager } from './jitsi-vc-manager';
 
 import * as fs from 'fs';
 import * as https from 'https';
@@ -52,7 +53,7 @@ import AdmZip from 'adm-zip';
 
 // const { JitsiMeetElectron } = require('@jitsi/electron-sdk');
 
-// Глобальная переменная для Jitsi окна
+let useVirtualCableMode = false;
 
 let JitsiMeetElectron: any;
 try {
@@ -413,6 +414,14 @@ async function createMainWindow(): Promise<BrowserWindow> {
     _isOnline(url, ses),
   );
 
+  ipcMain.handle("jitsi:set-virtual-cable-mode", async (event, enabled: boolean) => {
+      if (jitsiManager && typeof jitsiManager.enableVirtualCableMode === 'function') {
+          jitsiManager.enableVirtualCableMode(enabled);
+          return { success: true };
+      }
+      return { success: false, error: "Method not available" };
+  });
+
   function sendEventToZulip(eventName: string, data: any): void {
       const allContents = webContents.getAllWebContents();
       for (const content of allContents) {
@@ -464,6 +473,21 @@ async function createMainWindow(): Promise<BrowserWindow> {
   ipcMain.handle("get-desktop-sources", async () => {
     try {
         log.info("🎯[NativeCapture] Getting desktop sources...");
+
+        if (useVirtualCableMode) {
+            // В режиме Virtual Cable используем стандартный desktopCapturer
+            log.info("🖥️ Using Electron desktopCapturer (Virtual Cable mode)");
+            const sources = await desktopCapturer.getSources({
+                types: ['screen', 'window'],
+                thumbnailSize: { width: 300, height: 200 }
+            });
+            return sources.map(source => ({
+                id: source.id,
+                name: source.name,
+                thumbnail: { dataUrl: source.thumbnail.toDataURL() },
+                isNative: false
+            }));
+        }
         
         let formattedSources = [];
         let sourceType = 'unknown';
@@ -686,6 +710,18 @@ async function createMainWindow(): Promise<BrowserWindow> {
               }));
           `);
       }
+  });
+
+  ipcMain.handle("set-virtual-cable-mode", async (event, enabled: boolean) => {
+      useVirtualCableMode = enabled;
+      log.info(`[MAIN] Virtual Cable mode set to: ${enabled}`);
+      
+      // Передаём флаг в JitsiNativeManager
+      if (jitsiManager && typeof jitsiManager.enableVirtualCableMode === 'function') {
+          jitsiManager.enableVirtualCableMode(enabled);
+      }
+      
+      return { success: true };
   });
 
 

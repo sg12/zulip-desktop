@@ -60,6 +60,34 @@ export function getSourcePickerCode(): string {
                 header.style.cssText = 'margin-top: 0; color: #333; font-size: 24px;';
                 header.textContent = 'Выберите экран или окно для демонстрации';
                 fragment.appendChild(header);
+
+                // 🔘 ДОБАВЛЕН ЧЕКБОКС ДЛЯ ВИРТУАЛЬНОГО КАБЕЛЯ
+                const vcOption = document.createElement('label');
+                vcOption.style.cssText = \`
+                    display: flex;
+                    align-items: center;
+                    margin: 16px 0;
+                    font-size: 14px;
+                    color: #555;
+                \`;
+                const vcCheckbox = document.createElement('input');
+                vcCheckbox.type = 'checkbox';
+                vcCheckbox.id = 'use-virtual-cable';
+                vcCheckbox.style.cssText = 'margin-right: 10px; transform: scale(1.2);';
+                const vcLabel = document.createElement('span');
+                vcLabel.textContent = 'Использовать виртуальный кабель для звука (VB-Cable / VoiceMeeter)';
+                vcOption.appendChild(vcCheckbox);
+                vcOption.appendChild(vcLabel);
+                fragment.appendChild(vcOption);
+
+                const vcHelp = document.createElement('div');
+                vcHelp.style.cssText = 'font-size: 12px; color: #888; margin-top: 4px; line-height: 1.4;';
+                vcHelp.innerHTML = 'Требуется установка <a href="https://www.vb-audio.com/Cable/" target="_blank" style="color:#2196F3;">VB-Cable</a> и настройка перенаправления звука приложения.';
+                vcHelp.querySelector('a').onclick = (e) => {
+                    e.stopPropagation();
+                    window.open('https://www.vb-audio.com/Cable/', '_blank');
+                };
+                fragment.appendChild(vcHelp);
                 
                 const grid = document.createElement('div');
                 grid.style.cssText = \`
@@ -116,12 +144,14 @@ export function getSourcePickerCode(): string {
                     };
                     
                     item.onclick = () => {
+                        const useVC = document.getElementById('use-virtual-cable').checked;
                         overlay.style.background = 'rgba(0, 0, 0, 0)';
                         dialog.style.transform = 'scale(0.9)';
                         dialog.style.opacity = '0';
                         setTimeout(() => {
                             overlay.remove();
-                            callback(source.id);
+                            // Передаём ОБЪЕКТ: sourceId + флаг режима
+                            callback({ sourceId: source.id, useVirtualCable: useVC });
                         }, 200);
                     };
                     
@@ -359,16 +389,21 @@ export function getSimplifiedScreenShareInterceptorCode(): string {
                         const sources = await getElectronSourcesWithCache();
                         
                         // Используем импортированную функцию showSourcePicker
-                        showSourcePicker(sources, async (selectedId) => {
-                            if (!selectedId) {
+                        showSourcePicker(sources, async (result) => {
+                            if (!result || !result.sourceId) {
                                 window.__interceptorFlag = false;
                                 console.log('[JitsiManager] User cancelled source selection');
                                 return;
                             }
                             
+                            const { sourceId, useVirtualCable } = result;
+                            
                             try {
+                                // 🆕 Передаём режим Virtual Cable в main process
+                                await window.ipcRenderer.invoke('jitsi:set-virtual-cable-mode', useVirtualCable);
+                                
                                 // Сохраняем выбранный источник
-                                await window.ipcRenderer.invoke('jitsi:save-selected-source', selectedId);
+                                await window.ipcRenderer.invoke('jitsi:save-selected-source', sourceId);
                                 
                                 // Создаем нативный поток
                                 const streamResult = await window.ipcRenderer.invoke('create-native-stream-for-jitsi');
@@ -417,7 +452,7 @@ export function getSimplifiedScreenShareInterceptorCode(): string {
                                 if (callback) {
                                     setTimeout(() => {
                                         console.log('[JitsiManager] Calling Jitsi callback');
-                                        callback('native:' + selectedId, { 
+                                        callback('native:' + sourceId, { 
                                             audio: true, 
                                             screenShareAudio: true 
                                         });
