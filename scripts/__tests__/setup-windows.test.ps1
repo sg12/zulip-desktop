@@ -59,6 +59,7 @@ if ($openBraces -ne $closeBraces) {
     }
     exit 1
 }
+}
 
 Write-Host "[OK] Brace balance is correct" -ForegroundColor Green
 
@@ -87,7 +88,6 @@ try {
 } catch {
     Write-Host "[ERROR] Error creating scriptblock: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
-}
 }
 
 Write-Host ""

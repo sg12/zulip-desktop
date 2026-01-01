@@ -51,12 +51,16 @@ Write-Host ""
 
 # Install dependencies
 Write-Host "Installing npm dependencies..." -ForegroundColor Yellow
-npm install
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[ERROR] Failed to install dependencies!" -ForegroundColor Red
-    exit 1
+npm install 2>&1 | Out-String
+$npmExitCode = $LASTEXITCODE
+if ($npmExitCode -ne 0) {
+    Write-Host "[WARNING] npm install completed with exit code $npmExitCode" -ForegroundColor Yellow
+    Write-Host "  This might be due to file permissions or locked files." -ForegroundColor Yellow
+    Write-Host "  Try running as Administrator or close other programs using these files." -ForegroundColor Yellow
+    Write-Host "  Continuing anyway..." -ForegroundColor Yellow
+} else {
+    Write-Host "[OK] Dependencies installed" -ForegroundColor Green
 }
-Write-Host "[OK] Dependencies installed" -ForegroundColor Green
 Write-Host ""
 
 # Compile Windows native module
