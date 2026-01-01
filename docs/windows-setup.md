@@ -339,6 +339,9 @@ npm start
 
 ```powershell
 # В PowerShell (может потребоваться разрешение)
+npm run setup-windows
+
+# Или напрямую:
 PowerShell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 ```
 
@@ -349,6 +352,19 @@ PowerShell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 - ✅ Скомпилирует нативный модуль
 - ✅ Скопирует модуль в нужное место
 - ✅ Проверит наличие SoundVolumeView
+
+### Проверка синтаксиса скрипта
+
+Перед запуском можно проверить синтаксис скрипта:
+
+```powershell
+npm run test-setup-script
+```
+
+Этот тест проверит:
+- ✅ Корректность синтаксиса PowerShell
+- ✅ Баланс скобок `{}` и `()`
+- ✅ Возможность загрузки скрипта как модуля
 
 ## ✅ Чеклист перед запуском
 

@@ -1,0 +1,99 @@
+# Тест синтаксиса PowerShell скрипта setup-windows.ps1
+# Запуск: PowerShell -ExecutionPolicy Bypass -File scripts\__tests__\setup-windows.test.ps1
+
+$ErrorActionPreference = "Stop"
+
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Тест синтаксиса setup-windows.ps1" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+$scriptPath = Join-Path $PSScriptRoot "..\setup-windows.ps1"
+
+# Проверка существования файла
+if (-not (Test-Path $scriptPath)) {
+    Write-Host "✗ Файл не найден: $scriptPath" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Проверка файла: $scriptPath" -ForegroundColor Yellow
+
+# Проверка синтаксиса PowerShell через парсер
+try {
+    $errors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile(
+        $scriptPath,
+        [ref]$null,
+        [ref]$errors
+    )
+    
+    if ($errors -and $errors.Count -gt 0) {
+        Write-Host "✗ Обнаружены ошибки синтаксиса:" -ForegroundColor Red
+        foreach ($error in $errors) {
+            Write-Host "  Строка $($error.Extent.StartLineNumber): $($error.Message)" -ForegroundColor Red
+            Write-Host "    $($error.Extent.Text)" -ForegroundColor Gray
+        }
+        exit 1
+    }
+    
+    Write-Host "✓ Синтаксис PowerShell корректен" -ForegroundColor Green
+} catch {
+    Write-Host "✗ Ошибка при проверке синтаксиса:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+}
+
+# Проверка баланса скобок
+$content = Get-Content $scriptPath -Raw
+$openBraces = ([regex]::Matches($content, '\{')).Count
+$closeBraces = ([regex]::Matches($content, '\}')).Count
+
+Write-Host "Проверка баланса скобок..." -ForegroundColor Yellow
+Write-Host "  Открывающих '{': $openBraces" -ForegroundColor Gray
+Write-Host "  Закрывающих '}': $closeBraces" -ForegroundColor Gray
+
+if ($openBraces -ne $closeBraces) {
+    Write-Host "✗ Несбалансированные скобки!" -ForegroundColor Red
+    Write-Host "  Открывающих: $openBraces, Закрывающих: $closeBraces" -ForegroundColor Red
+    
+    # Показываем строки с открывающими скобками
+    $lines = Get-Content $scriptPath
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '\{') {
+            Write-Host "  Строка $($i+1): $($lines[$i].Trim())" -ForegroundColor Yellow
+        }
+    }
+    exit 1
+}
+
+Write-Host "✓ Баланс скобок корректен" -ForegroundColor Green
+
+# Проверка баланса круглых скобок
+$openParens = ([regex]::Matches($content, '\(')).Count
+$closeParens = ([regex]::Matches($content, '\)')).Count
+
+if ($openParens -ne $closeParens) {
+    Write-Host "✗ Несбалансированные круглые скобки!" -ForegroundColor Red
+    Write-Host "  Открывающих: $openParens, Закрывающих: $closeParens" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "✓ Баланс круглых скобок корректен" -ForegroundColor Green
+
+# Проверка что скрипт можно загрузить как модуль (без выполнения)
+try {
+    $scriptBlock = [scriptblock]::Create((Get-Content $scriptPath -Raw))
+    Write-Host "✓ Скрипт может быть загружен как scriptblock" -ForegroundColor Green
+} catch {
+    Write-Host "✗ Ошибка при создании scriptblock:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Все проверки пройдены успешно! ✓" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+exit 0

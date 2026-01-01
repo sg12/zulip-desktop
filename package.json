@@ -44,7 +44,7 @@
     "test-unit-watch": "vitest",
     "test-coverage": "vitest run --coverage",
     "test-e2e": "vite build && tape \"tests/**/*.js\"",
-    "setup-windows": "powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1",
+    "test-setup-script": "powershell -ExecutionPolicy Bypass -File scripts/__tests__/setup-windows.test.ps1",
     "setup-windows": "powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1",
     "pack": "vite build && electron-builder --dir",
     "dist": "vite build && electron-builder --mac",
