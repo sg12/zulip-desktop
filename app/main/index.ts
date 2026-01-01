@@ -391,6 +391,36 @@ async function createMainWindow(): Promise<BrowserWindow> {
     }
   );
 
+  // Автодетект Virtual Cable устройства при запуске (только Windows)
+  if (process.platform === 'win32') {
+      (async function detectVirtualCable() {
+          try {
+              const { exec } = require('child_process');
+              exec('wmic sounddev get name', (error: any, stdout: string) => {
+                  if (error) {
+                      log.warn('[Virtual Cable] Detection failed:', error.message);
+                      return;
+                  }
+                  
+                  const lowerStdout = stdout.toLowerCase();
+                  const hasVC = lowerStdout.includes('cable') || 
+                                lowerStdout.includes('voicemeeter') ||
+                                lowerStdout.includes('vb-audio');
+                  
+                  if (hasVC) {
+                      log.info('[Virtual Cable] ✅ Device detected, auto-enabling mode');
+                      useVirtualCableMode = true;
+                      jitsiManager.enableVirtualCableMode(true);
+                  } else {
+                      log.info('[Virtual Cable] No virtual audio device found');
+                  }
+              });
+          } catch (e: any) {
+              log.warn('[Virtual Cable] Detection error:', e.message);
+          }
+      })();
+  }
+
   
 
   // 2. ЗАТЕМ создаем сессию
@@ -415,11 +445,22 @@ async function createMainWindow(): Promise<BrowserWindow> {
   );
 
   ipcMain.handle("jitsi:set-virtual-cable-mode", async (event, enabled: boolean) => {
+      // 🔧 ИСПРАВЛЕНИЕ: Синхронизируем глобальную переменную
+      useVirtualCableMode = enabled;
+      log.info(`[Virtual Cable] Mode set to: ${enabled}`);
+      
       if (jitsiManager && typeof jitsiManager.enableVirtualCableMode === 'function') {
           jitsiManager.enableVirtualCableMode(enabled);
-          return { success: true };
+          return { success: true, enabled };
       }
       return { success: false, error: "Method not available" };
+  });
+
+  ipcMain.handle("jitsi:get-virtual-cable-status", async () => {
+      return {
+          enabled: useVirtualCableMode,
+          managerEnabled: jitsiManager?.isVirtualCableMode?.() ?? false
+      };
   });
 
   function sendEventToZulip(eventName: string, data: any): void {

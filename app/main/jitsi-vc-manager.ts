@@ -73,6 +73,11 @@ export class JitsiNativeManager {
         log.info(`[JITSI-NATIVE-MANAGER] Virtual Cable mode: ${enable ? 'ENABLED' : 'DISABLED'}`);
     }
 
+    // 🆕 Геттер для проверки режима Virtual Cable
+    isVirtualCableMode(): boolean {
+        return this.useVirtualCableMode;
+    }
+
     private registerHandlers(): void {
         ipcMain.handle("jitsi:create-window", async (event, options: JitsiOptions) => {
             return this.createWindow(options);
@@ -447,7 +452,8 @@ export class JitsiNativeManager {
                 if (result.success) {
                     this.state.isStreamActive = true;
                     this.state.streamId = result.streamId;
-                    log.info("[VC-MODE] Hybrid stream via Virtual Cable created");
+                    log.info("[VC-MODE] ✅ Hybrid stream via Virtual Cable created successfully");
+                    log.info(`[VC-MODE] Stream ID: ${result.streamId}`);
                 }
                 return result;
             } else {
@@ -517,23 +523,58 @@ export class JitsiNativeManager {
                         let audioStream;
                         try {
                             const devices = await navigator.mediaDevices.enumerateDevices();
-                            const vcDevice = devices.find(d => 
-                                d.kind === 'audioinput' && 
-                                (d.label.includes('CABLE Input') || 
-                                 d.label.includes('VoiceMeeter Input') ||
-                                 d.label.includes('VB-Audio'))
+                            
+                            // Логируем все аудиоустройства для диагностики
+                            const audioInputs = devices.filter(d => d.kind === 'audioinput');
+                            console.log('[VC-MODE] Available audio input devices:', 
+                                audioInputs.map(d => ({ label: d.label, id: d.deviceId.substring(0, 8) }))
                             );
+                            
+                            // Расширенный список паттернов для поиска Virtual Cable
+                            const vcPatterns = [
+                                'cable input',      // VB-Audio Virtual Cable
+                                'cable output',     // VB-Audio Virtual Cable (output mode)
+                                'voicemeeter',      // VoiceMeeter
+                                'vb-audio',         // VB-Audio products
+                                'virtual audio',    // Generic virtual audio
+                                'virtual cable',    // Generic
+                                'blackhole',        // macOS BlackHole (на всякий случай)
+                                'soundflower'       // macOS Soundflower (legacy)
+                            ];
+                            
+                            const vcDevice = audioInputs.find(d => {
+                                const label = d.label.toLowerCase();
+                                return vcPatterns.some(pattern => label.includes(pattern));
+                            });
+                            
                             if (vcDevice) {
+                                console.log('[VC-MODE] ✅ Found Virtual Cable device:', vcDevice.label);
                                 audioStream = await navigator.mediaDevices.getUserMedia({
-                                    audio: { deviceId: { exact: vcDevice.deviceId } },
+                                    audio: { 
+                                        deviceId: { exact: vcDevice.deviceId },
+                                        echoCancellation: false,  // Отключаем обработку - не нужна для системного звука
+                                        noiseSuppression: false,
+                                        autoGainControl: false
+                                    },
                                     video: false
                                 });
+                                console.log('[VC-MODE] ✅ Audio stream acquired successfully');
                             } else {
-                                throw new Error('Virtual cable device not found');
+                                // Детальная ошибка с информацией об устройствах
+                                const deviceList = audioInputs.map(d => d.label).join(', ') || 'none found';
+                                console.error('[VC-MODE] ❌ Virtual Cable not found');
+                                console.error('[VC-MODE] Available devices:', deviceList);
+                                throw new Error(
+                                    'Virtual Cable device not found. ' +
+                                    'Please install VB-Audio Virtual Cable from https://vb-audio.com/Cable/ ' +
+                                    'Available devices: ' + deviceList
+                                );
                             }
                         } catch (e) {
-                            console.error('[VC-MODE] Audio capture failed:', e);
-                            throw new Error('Failed to capture audio from virtual cable');
+                            console.error('[VC-MODE] ❌ Audio capture failed:', e);
+                            // Пробрасываем оригинальную ошибку с дополнительным контекстом
+                            const errorMessage = e instanceof Error ? e.message : String(e);
+                            throw new Error('Failed to capture audio from Virtual Cable: ' + errorMessage);
                         }
 
                         // 3. Объединение
