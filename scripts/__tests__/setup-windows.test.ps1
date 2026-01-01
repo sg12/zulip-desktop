@@ -12,7 +12,7 @@ $scriptPath = Join-Path $PSScriptRoot "..\setup-windows.ps1"
 
 # Проверка существования файла
 if (-not (Test-Path $scriptPath)) {
-    Write-Host "✗ Файл не найден: $scriptPath" -ForegroundColor Red
+    Write-Host "[ERROR] Файл не найден: $scriptPath" -ForegroundColor Red
     exit 1
 }
 
@@ -27,7 +27,7 @@ $null = [System.Management.Automation.Language.Parser]::ParseFile(
 )
 
 if ($parseErrors -and $parseErrors.Count -gt 0) {
-    Write-Host "✗ Обнаружены ошибки синтаксиса:" -ForegroundColor Red
+    Write-Host "[ERROR] Обнаружены ошибки синтаксиса:" -ForegroundColor Red
     foreach ($error in $parseErrors) {
         Write-Host "  Строка $($error.Extent.StartLineNumber): $($error.Message)" -ForegroundColor Red
         Write-Host "    $($error.Extent.Text)" -ForegroundColor Gray
@@ -35,7 +35,7 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
     exit 1
 }
 
-Write-Host "✓ Синтаксис PowerShell корректен" -ForegroundColor Green
+Write-Host "[OK] Синтаксис PowerShell корректен" -ForegroundColor Green
 
 # Проверка баланса скобок
 $content = Get-Content $scriptPath -Raw
@@ -47,7 +47,7 @@ Write-Host "  Открывающих '{': $openBraces" -ForegroundColor Gray
 Write-Host "  Закрывающих '}': $closeBraces" -ForegroundColor Gray
 
 if ($openBraces -ne $closeBraces) {
-    Write-Host "✗ Несбалансированные скобки!" -ForegroundColor Red
+    Write-Host "[ERROR] Несбалансированные скобки!" -ForegroundColor Red
     Write-Host "  Открывающих: $openBraces, Закрывающих: $closeBraces" -ForegroundColor Red
     
     # Показываем строки с открывающими скобками
@@ -60,33 +60,38 @@ if ($openBraces -ne $closeBraces) {
     exit 1
 }
 
-Write-Host "✓ Баланс скобок корректен" -ForegroundColor Green
+Write-Host "[OK] Баланс скобок корректен" -ForegroundColor Green
 
 # Проверка баланса круглых скобок
 $openParens = ([regex]::Matches($content, '\(')).Count
 $closeParens = ([regex]::Matches($content, '\)')).Count
 
 if ($openParens -ne $closeParens) {
-    Write-Host "✗ Несбалансированные круглые скобки!" -ForegroundColor Red
+    Write-Host "[ERROR] Несбалансированные круглые скобки!" -ForegroundColor Red
     Write-Host "  Открывающих: $openParens, Закрывающих: $closeParens" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "✓ Баланс круглых скобок корректен" -ForegroundColor Green
+Write-Host "[OK] Баланс круглых скобок корректен" -ForegroundColor Green
 
 # Проверка что скрипт можно загрузить как модуль (без выполнения)
 $scriptContent = Get-Content $scriptPath -Raw
-$scriptBlock = [scriptblock]::Create($scriptContent)
-if ($scriptBlock) {
-    Write-Host "✓ Скрипт может быть загружен как scriptblock" -ForegroundColor Green
-} else {
-    Write-Host "✗ Ошибка при создании scriptblock" -ForegroundColor Red
+try {
+    $scriptBlock = [scriptblock]::Create($scriptContent)
+    if ($scriptBlock) {
+        Write-Host "[OK] Скрипт может быть загружен как scriptblock" -ForegroundColor Green
+    } else {
+        Write-Host "[ERROR] Ошибка при создании scriptblock" -ForegroundColor Red
+        exit 1
+    }
+} catch {
+    Write-Host "[ERROR] Ошибка при создании scriptblock: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  Все проверки пройдены успешно! ✓" -ForegroundColor Green
+Write-Host "  Все проверки пройдены успешно!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
