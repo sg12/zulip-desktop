@@ -8,62 +8,43 @@ Write-Host ""
 
 # Проверка версий
 Write-Host "Проверка версий..." -ForegroundColor Yellow
-try {
-    $nodeVersion = node -v 2>$null
-    if ($nodeVersion) {
-        Write-Host "✓ Node.js: $nodeVersion" -ForegroundColor Green
-    } else {
-        Write-Host "✗ Node.js не установлен!" -ForegroundColor Red
-        Write-Host "  Скачайте с https://nodejs.org/" -ForegroundColor Yellow
-        exit 1
-    }
-} catch {
+$nodeVersion = node -v 2>$null
+if ($nodeVersion) {
+    Write-Host "✓ Node.js: $nodeVersion" -ForegroundColor Green
+} else {
     Write-Host "✗ Node.js не установлен!" -ForegroundColor Red
+    Write-Host "  Скачайте с https://nodejs.org/" -ForegroundColor Yellow
     exit 1
 }
 
-try {
-    $npmVersion = npm -v 2>$null
-    if ($npmVersion) {
-        Write-Host "✓ npm: $npmVersion" -ForegroundColor Green
-    } else {
-        Write-Host "✗ npm не найден!" -ForegroundColor Red
-        exit 1
-    }
-} catch {
+$npmVersion = npm -v 2>$null
+if ($npmVersion) {
+    Write-Host "✓ npm: $npmVersion" -ForegroundColor Green
+} else {
     Write-Host "✗ npm не найден!" -ForegroundColor Red
     exit 1
 }
 
-try {
-    $pythonVersion = python --version 2>$null
-    if ($pythonVersion) {
-        Write-Host "✓ Python: $pythonVersion" -ForegroundColor Green
-    } else {
-        Write-Host "✗ Python не установлен!" -ForegroundColor Red
-        Write-Host "  Скачайте с https://www.python.org/downloads/" -ForegroundColor Yellow
-        Write-Host "  ⚠️  Важно: Отметьте 'Add Python to PATH' при установке" -ForegroundColor Yellow
-    }
-} catch {
+$pythonVersion = python --version 2>$null
+if ($pythonVersion) {
+    Write-Host "✓ Python: $pythonVersion" -ForegroundColor Green
+} else {
     Write-Host "✗ Python не установлен!" -ForegroundColor Red
     Write-Host "  Скачайте с https://www.python.org/downloads/" -ForegroundColor Yellow
+    Write-Host "  Важно: Отметьте 'Add Python to PATH' при установке" -ForegroundColor Yellow
 }
 
 Write-Host ""
 
 # Проверка VB-Cable
 Write-Host "Проверка VB-Audio Virtual Cable..." -ForegroundColor Yellow
-try {
-    $vcCheck = wmic sounddev get name 2>$null | Select-String -Pattern "cable|vb-audio" -CaseSensitive:$false
-    if ($vcCheck) {
-        Write-Host "✓ VB-Cable найден: $vcCheck" -ForegroundColor Green
-    } else {
-        Write-Host "⚠️  VB-Cable не найден" -ForegroundColor Yellow
-        Write-Host "  Скачайте с https://vb-audio.com/Cable/" -ForegroundColor Yellow
-        Write-Host "  После установки перезагрузите компьютер!" -ForegroundColor Yellow
-    }
-} catch {
-    Write-Host "⚠️  Не удалось проверить VB-Cable" -ForegroundColor Yellow
+$vcCheck = wmic sounddev get name 2>$null | Select-String -Pattern "cable|vb-audio" -CaseSensitive:$false
+if ($vcCheck) {
+    Write-Host "✓ VB-Cable найден: $vcCheck" -ForegroundColor Green
+} else {
+    Write-Host "⚠️  VB-Cable не найден" -ForegroundColor Yellow
+    Write-Host "  Скачайте с https://vb-audio.com/Cable/" -ForegroundColor Yellow
+    Write-Host "  После установки перезагрузите компьютер!" -ForegroundColor Yellow
 }
 
 Write-Host ""
@@ -147,14 +128,10 @@ foreach ($svvPath in $svvPaths) {
 
 # Проверка в PATH
 if (-not $svvFound) {
-    try {
-        $svvInPath = Get-Command SoundVolumeView.exe -ErrorAction SilentlyContinue
-        if ($svvInPath) {
-            Write-Host "✓ SoundVolumeView найден в PATH: $($svvInPath.Source)" -ForegroundColor Green
-            $svvFound = $true
-        }
-    } catch {
-        # Игнорируем ошибку
+    $svvInPath = Get-Command SoundVolumeView.exe -ErrorAction SilentlyContinue
+    if ($svvInPath) {
+        Write-Host "✓ SoundVolumeView найден в PATH: $($svvInPath.Source)" -ForegroundColor Green
+        $svvFound = $true
     }
 }
 

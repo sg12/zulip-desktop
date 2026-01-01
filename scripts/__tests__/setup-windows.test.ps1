@@ -19,29 +19,23 @@ if (-not (Test-Path $scriptPath)) {
 Write-Host "Проверка файла: $scriptPath" -ForegroundColor Yellow
 
 # Проверка синтаксиса PowerShell через парсер
-try {
-    $errors = $null
-    $null = [System.Management.Automation.Language.Parser]::ParseFile(
-        $scriptPath,
-        [ref]$null,
-        [ref]$errors
-    )
-    
-    if ($errors -and $errors.Count -gt 0) {
-        Write-Host "✗ Обнаружены ошибки синтаксиса:" -ForegroundColor Red
-        foreach ($error in $errors) {
-            Write-Host "  Строка $($error.Extent.StartLineNumber): $($error.Message)" -ForegroundColor Red
-            Write-Host "    $($error.Extent.Text)" -ForegroundColor Gray
-        }
-        exit 1
+$parseErrors = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile(
+    $scriptPath,
+    [ref]$null,
+    [ref]$parseErrors
+)
+
+if ($parseErrors -and $parseErrors.Count -gt 0) {
+    Write-Host "✗ Обнаружены ошибки синтаксиса:" -ForegroundColor Red
+    foreach ($error in $parseErrors) {
+        Write-Host "  Строка $($error.Extent.StartLineNumber): $($error.Message)" -ForegroundColor Red
+        Write-Host "    $($error.Extent.Text)" -ForegroundColor Gray
     }
-    
-    Write-Host "✓ Синтаксис PowerShell корректен" -ForegroundColor Green
-} catch {
-    Write-Host "✗ Ошибка при проверке синтаксиса:" -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
     exit 1
 }
+
+Write-Host "✓ Синтаксис PowerShell корректен" -ForegroundColor Green
 
 # Проверка баланса скобок
 $content = Get-Content $scriptPath -Raw
@@ -81,12 +75,12 @@ if ($openParens -ne $closeParens) {
 Write-Host "✓ Баланс круглых скобок корректен" -ForegroundColor Green
 
 # Проверка что скрипт можно загрузить как модуль (без выполнения)
-try {
-    $scriptBlock = [scriptblock]::Create((Get-Content $scriptPath -Raw))
+$scriptContent = Get-Content $scriptPath -Raw
+$scriptBlock = [scriptblock]::Create($scriptContent)
+if ($scriptBlock) {
     Write-Host "✓ Скрипт может быть загружен как scriptblock" -ForegroundColor Green
-} catch {
-    Write-Host "✗ Ошибка при создании scriptblock:" -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+} else {
+    Write-Host "✗ Ошибка при создании scriptblock" -ForegroundColor Red
     exit 1
 }
 
