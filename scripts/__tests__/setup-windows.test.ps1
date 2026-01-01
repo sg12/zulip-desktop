@@ -28,71 +28,59 @@ $null = [System.Management.Automation.Language.Parser]::ParseFile(
 
 if ($parseErrors -and $parseErrors.Count -gt 0) {
     Write-Host "[ERROR] Syntax errors found:" -ForegroundColor Red
-    foreach ($error in $parseErrors) {
-        Write-Host "  Line $($error.Extent.StartLineNumber): $($error.Message)" -ForegroundColor Red
-        Write-Host "    $($error.Extent.Text)" -ForegroundColor Gray
+    foreach ($err in $parseErrors) {
+        Write-Host "  Line $($err.Extent.StartLineNumber): $($err.Message)" -ForegroundColor Red
     }
     exit 1
 }
 
 Write-Host "[OK] PowerShell syntax is correct" -ForegroundColor Green
 
-# Check brace balance
+# Check brace balance using regex
 $content = Get-Content $scriptPath -Raw
-$openBraces = ($content.ToCharArray() | Where-Object { $_ -eq '{' }).Count
-$closeBraces = ($content.ToCharArray() | Where-Object { $_ -eq '}' }).Count
+$openBraceChar = [char]123  # ASCII for '{'
+$closeBraceChar = [char]125 # ASCII for '}'
+$openBraces = ($content.ToCharArray() | Where-Object { $_ -eq $openBraceChar }).Count
+$closeBraces = ($content.ToCharArray() | Where-Object { $_ -eq $closeBraceChar }).Count
 
 Write-Host "Checking brace balance..." -ForegroundColor Yellow
 Write-Host "  Open braces: $openBraces" -ForegroundColor Gray
 Write-Host "  Close braces: $closeBraces" -ForegroundColor Gray
 
 if ($openBraces -ne $closeBraces) {
-    Write-Host "[ERROR] Unbalanced braces!" -ForegroundColor Red
-    Write-Host "  Open: $openBraces, Close: $closeBraces" -ForegroundColor Red
-    
-    # Show lines with opening braces
-    $lines = Get-Content $scriptPath
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '\{') {
-            Write-Host "  Line $($i+1): $($lines[$i].Trim())" -ForegroundColor Yellow
-        }
-    }
+    Write-Host "[ERROR] Unbalanced braces! Open: $openBraces, Close: $closeBraces" -ForegroundColor Red
     exit 1
-}
 }
 
 Write-Host "[OK] Brace balance is correct" -ForegroundColor Green
 
 # Check parentheses balance
-$openParens = ($content.ToCharArray() | Where-Object { $_ -eq '(' }).Count
-$closeParens = ($content.ToCharArray() | Where-Object { $_ -eq ')' }).Count
+$openParen = [char]40  # ASCII for '('
+$closeParen = [char]41 # ASCII for ')'
+$openParens = ($content.ToCharArray() | Where-Object { $_ -eq $openParen }).Count
+$closeParens = ($content.ToCharArray() | Where-Object { $_ -eq $closeParen }).Count
 
 if ($openParens -ne $closeParens) {
-    Write-Host "[ERROR] Unbalanced parentheses!" -ForegroundColor Red
-    Write-Host "  Open: $openParens, Close: $closeParens" -ForegroundColor Red
+    Write-Host "[ERROR] Unbalanced parentheses! Open: $openParens, Close: $closeParens" -ForegroundColor Red
     exit 1
 }
 
 Write-Host "[OK] Parentheses balance is correct" -ForegroundColor Green
 
-# Check if script can be loaded as module (without execution)
+# Check if script can be loaded as scriptblock
 $scriptContent = Get-Content $scriptPath -Raw
 try {
     $scriptBlock = [scriptblock]::Create($scriptContent)
-    if ($scriptBlock) {
-        Write-Host "[OK] Script can be loaded as scriptblock" -ForegroundColor Green
-    } else {
-        Write-Host "[ERROR] Failed to create scriptblock" -ForegroundColor Red
-        exit 1
-    }
-} catch {
+    Write-Host "[OK] Script can be loaded as scriptblock" -ForegroundColor Green
+}
+catch {
     Write-Host "[ERROR] Error creating scriptblock: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  All checks passed successfully!" -ForegroundColor Green
+Write-Host "  All checks passed!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
