@@ -1321,16 +1321,69 @@ export class JitsiNativeManager {
                 log.info(`[VC-MODE]   - ${s.processName} (${s.displayName}) - ${s.volume}%`);
             });
             
+            if (sessions.length === 0) {
+                log.warn("[VC-MODE] ⚠️ No audio sessions found - start an app with sound first!");
+                return;
+            }
+            
             // Пытаемся найти совпадение по имени
             const sourceNameLower = sourceName.toLowerCase();
-            const matchedSession = sessions.find(s => {
+            
+            // Известные браузеры - если заголовок окна содержит название сайта, 
+            // а в sessions есть браузер - это скорее всего он
+            const browserProcesses = ['chrome', 'firefox', 'msedge', 'opera', 'brave', 'yandex', 'vivaldi'];
+            const gameProcesses = ['cs2', 'dota2', 'valorant', 'steam', 'epicgames', 'discord'];
+            
+            let matchedSession = sessions.find(s => {
                 const processLower = s.processName.toLowerCase().replace('.exe', '');
                 const displayLower = s.displayName.toLowerCase();
-                return sourceNameLower.includes(processLower) || 
-                       sourceNameLower.includes(displayLower) ||
-                       processLower.includes(sourceNameLower.split(' ')[0]) ||
-                       displayLower.includes(sourceNameLower.split(' ')[0]);
+                
+                // Прямое совпадение
+                if (sourceNameLower.includes(processLower) || 
+                    sourceNameLower.includes(displayLower) ||
+                    processLower.includes(sourceNameLower.split(' ')[0]) ||
+                    displayLower.includes(sourceNameLower.split(' ')[0])) {
+                    return true;
+                }
+                
+                // Проверяем паттерн браузера: "Название сайта - Chrome" или "Название сайта — Mozilla Firefox"
+                const browserSuffixes = [' - google chrome', ' - chrome', ' - mozilla firefox', ' - firefox', 
+                                        ' - microsoft edge', ' - edge', ' — opera', ' - brave', ' - yandex'];
+                for (const suffix of browserSuffixes) {
+                    if (sourceNameLower.includes(suffix.replace(' - ', '').replace(' — ', ''))) {
+                        // Источник это браузер, ищем соответствующий процесс
+                        const browserName = suffix.replace(' - ', '').replace(' — ', '').split(' ')[0];
+                        if (processLower.includes(browserName)) {
+                            return true;
+                        }
+                    }
+                }
+                
+                return false;
             });
+            
+            // Если не нашли прямое совпадение, но есть только одна сессия (кроме electron) - используем её
+            if (!matchedSession) {
+                const nonElectronSessions = sessions.filter(s => 
+                    !s.processName.toLowerCase().includes('electron')
+                );
+                if (nonElectronSessions.length === 1) {
+                    matchedSession = nonElectronSessions[0];
+                    log.info(`[VC-MODE] 💡 Only one non-Electron audio session found, using it: ${matchedSession.processName}`);
+                }
+            }
+            
+            // Если всё ещё не нашли, проверяем известные браузеры/игры
+            if (!matchedSession) {
+                matchedSession = sessions.find(s => {
+                    const processLower = s.processName.toLowerCase().replace('.exe', '');
+                    return browserProcesses.some(b => processLower.includes(b)) ||
+                           gameProcesses.some(g => processLower.includes(g));
+                });
+                if (matchedSession) {
+                    log.info(`[VC-MODE] 💡 Found known app in sessions: ${matchedSession.processName}`);
+                }
+            }
             
             if (matchedSession) {
                 log.info(`[VC-MODE] ✅ Matched source "${sourceName}" to process "${matchedSession.processName}"`);
@@ -1342,9 +1395,10 @@ export class JitsiNativeManager {
                 }
             } else {
                 log.warn(`[VC-MODE] ⚠️ No matching audio session found for "${sourceName}"`);
+                log.info("[VC-MODE] 💡 TIP: Make sure the app you want to share is playing audio!");
                 log.info("[VC-MODE] Available sessions for manual selection:");
                 sessions.forEach(s => {
-                    log.info(`[VC-MODE]   → ${s.processName}`);
+                    log.info(`[VC-MODE]   → ${s.processName} (${s.displayName})`);
                 });
             }
         } catch (error: any) {
