@@ -6,7 +6,8 @@ import { NativeCaptureManager } from "./native-capture";
 import { JitsiScreenShareMonitor } from "./jitsi-screen-share-monitor";
 import { 
     VideoQualityManager, 
-    VIDEO_QUALITY_PRESETS
+    VIDEO_QUALITY_PRESETS,
+    getApplyQualityPresetCode
 } from "./video-quality-manager";
 import {
     AudioProcessor,
@@ -209,7 +210,7 @@ export class JitsiNativeManager {
                 types: ['window', 'screen'],
                 thumbnailSize: { width: 200, height: 140 }
             });
-            return sources.map(s => ({
+            return sources.map((s: any) => ({
                 id: s.id,
                 name: s.name,
                 display_id: s.display_id,
@@ -291,7 +292,7 @@ export class JitsiNativeManager {
             await this.uiManager.injectLoadingScreen(this.state.window);
             this.state.window.show();
             this.state.window.webContents.on('did-start-loading', () => {
-                this.state.window.webContents.insertCSS(`
+                this.state.window?.webContents.insertCSS(`
                     html, body {
                         background: #1a1a2e !important;
                         transition: opacity 0.3s ease-in-out;
@@ -620,8 +621,300 @@ export class JitsiNativeManager {
         }
     }
 
-    // ... остальные методы (startNativeAudioCapture, convertElectronToNativeId, createHybridStreamInJitsi, setupAudioCallbacks и т.д.)
-    // остаются без изменений — как в вашем исходном файле
+    // ===== МЕТОДЫ ДЛЯ НАТИВНОГО ЗАХВАТА (не Virtual Cable) =====
+    
+    private async startNativeAudioCapture(sourceId: string): Promise<{ success: boolean; error?: string }> {
+        log.info("[JITSI-VC] Starting native audio capture");
+        log.info(`[JITSI-VC] Electron sourceId: ${sourceId}`);
+        
+        try {
+            const nativeSourceId = await this.convertElectronToNativeId(sourceId);
+            log.info(`[JITSI-VC] Converted to native ID: ${nativeSourceId}`);
+            
+            const result = await this.nativeCapture.startAudioOnlyCapture(nativeSourceId);
+            
+            if (result.success) {
+                log.info("[JITSI-VC] Audio-only capture started");
+            } else {
+                log.error(`[JITSI-VC] Audio-only capture failed: ${result.error}`);
+            }
+            
+            return result;
+            
+        } catch (error: any) {
+            log.error(`[JITSI-VC] startNativeAudioCapture ERROR: ${error.message}`);
+            return { success: false, error: error.message };
+        }
+    }
+
+    private async convertElectronToNativeId(electronSourceId: string): Promise<string> {
+        log.info(`[JITSI-VC] Converting Electron ID: ${electronSourceId}`);
+        
+        if (electronSourceId.startsWith('screen:')) {
+            const parts = electronSourceId.split(':');
+            const displayId = parts[1] || '0';
+            
+            if (this.isWindowsPlatform()) {
+                return `screen:${displayId}:0`;
+            } else {
+                return `display:${displayId}`;
+            }
+        } else if (electronSourceId.startsWith('window:')) {
+            const parts = electronSourceId.split(':');
+            const windowId = parts[1] || '0';
+            
+            if (this.isWindowsPlatform()) {
+                const nativeSources = await this.nativeCapture.getSources();
+                const electronSources = await this.getElectronSources();
+                const electronWindow = electronSources.find(s => s.id === electronSourceId);
+                
+                if (electronWindow) {
+                    const nativeWindow = nativeSources.find(ns => 
+                        ns.name && electronWindow.name && 
+                        ns.name.includes(electronWindow.name)
+                    );
+                    
+                    if (nativeWindow) {
+                        return `window:${nativeWindow.id}:0`;
+                    }
+                }
+                
+                return `window:${windowId}:0`;
+            } else {
+                return `window:${windowId}`;
+            }
+        }
+        
+        log.warn(`[JITSI-VC] Unknown format, returning as-is: ${electronSourceId}`);
+        return electronSourceId;
+    }
+
+    private isWindowsPlatform(): boolean {
+        return process.platform === 'win32';
+    }
+
+    private async getElectronSources(): Promise<any[]> {
+        const { desktopCapturer } = require('electron');
+        return await desktopCapturer.getSources({
+            types: ['window', 'screen']
+        });
+    }
+
+    private async createHybridStreamInJitsi(electronSourceId: string): Promise<any> {
+        log.info(`[JITSI-VC] createHybridStreamInJitsi: ${electronSourceId}`);
+        
+        if (!this.state.window || this.state.window.isDestroyed()) {
+            log.error("[JITSI-VC] No window");
+            return { success: false, error: "No window" };
+        }
+        
+        const qualitySettings = this.videoQualityManager.getCurrentSettings();
+        const ringBufferCode = getRingBufferCode();
+        
+        try {
+            const result = await this.state.window.webContents.executeJavaScript(`
+                (async function() {
+                    const isWindows = ${this.isWindowsPlatform()};
+                    window.__creatingHybridStream = true;
+                    console.log('[JITSI-VC] Creating hybrid stream, platform:', isWindows ? 'Windows' : 'macOS');
+                    
+                    try {
+                        // Очистка
+                        if (window.jitsiNativeMediaStream) {
+                            window.jitsiNativeMediaStream.getTracks().forEach(track => {
+                                track.stop();
+                            });
+                            window.jitsiNativeMediaStream = null;
+                        }
+
+                        if (window.screenShareAudioContext) {
+                            try {
+                                await window.screenShareAudioContext.close();
+                            } catch (e) {}
+                            window.screenShareAudioContext = null;
+                        }
+
+                        window.isNativeActive = false;
+                        window.isScreenShareActive = false;
+
+                        ${ringBufferCode}
+                        
+                        // 1. Получаем VIDEO от Electron
+                        const videoStream = await navigator.mediaDevices.getUserMedia({
+                            audio: false,
+                            video: {
+                                mandatory: {
+                                    chromeMediaSource: 'desktop',
+                                    chromeMediaSourceId: '${electronSourceId}',
+                                    minWidth: ${qualitySettings.width.min},
+                                    maxWidth: ${qualitySettings.width.max},
+                                    minHeight: ${qualitySettings.height.min},
+                                    maxHeight: ${qualitySettings.height.max},
+                                    minFrameRate: ${qualitySettings.frameRate.min},
+                                    maxFrameRate: ${qualitySettings.frameRate.max}
+                                }
+                            }
+                        });
+
+                        window.__creatingHybridStream = false;
+                        window.jitsiNativeMediaStream = videoStream;
+                        window.isNativeActive = true;
+                        
+                        const videoTrack = videoStream.getVideoTracks()[0];
+                        if (!videoTrack) {
+                            throw new Error('No video track');
+                        }
+                        
+                        // 2. Создаем аудио контекст
+                        const screenShareAudioContext = new AudioContext({ 
+                            sampleRate: 48000, 
+                            latencyHint: 'interactive' 
+                        });
+                        
+                        window.screenShareAudioContext = screenShareAudioContext;
+                        
+                        const scriptProcessor = screenShareAudioContext.createScriptProcessor(2048, 0, 2);
+                        
+                        // 3. Создаем буферы
+                        window.screenShareLeftBuffer = new RingBuffer(48000);
+                        window.screenShareRightBuffer = new RingBuffer(48000);
+                        window.leftRingBuffer = window.screenShareLeftBuffer;
+                        window.rightRingBuffer = window.screenShareRightBuffer;
+                        
+                        // 4. Обработка аудио
+                        scriptProcessor.onaudioprocess = (event) => {                            
+                            const leftChannel = event.outputBuffer.getChannelData(0);
+                            const rightChannel = event.outputBuffer.getChannelData(1);
+                            
+                            if (window.screenShareLeftBuffer && window.screenShareRightBuffer) {
+                                window.screenShareLeftBuffer.read(leftChannel);
+                                window.screenShareRightBuffer.read(rightChannel);
+                            }
+                        };
+                        
+                        const destination = screenShareAudioContext.createMediaStreamDestination();
+                        scriptProcessor.connect(destination);
+                        
+                        // 5. Создаем поток
+                        const screenShareStream = new MediaStream();
+                        screenShareStream.addTrack(videoTrack);
+                        
+                        if (destination.stream.getAudioTracks().length > 0) {
+                            const audioTrack = destination.stream.getAudioTracks()[0];
+                            audioTrack.contentHint = 'screenshare';
+                            screenShareStream.addTrack(audioTrack);
+                        }
+                        
+                        window.jitsiNativeMediaStream = screenShareStream;
+                        window.screenShareStream = screenShareStream;
+                        window.nativeAudioContext = screenShareAudioContext;
+                        window.isNativeActive = true;
+                        window.isScreenShareActive = true;
+                        window.isHybridMode = true;
+                        
+                        if (screenShareAudioContext.state === 'suspended') {
+                            await screenShareAudioContext.resume();
+                        }
+                        
+                        videoTrack.addEventListener('ended', async () => {
+                            console.log('[JITSI-VC] Video track ended, cleaning up...');
+                            if (window.screenShareAudioContext) {
+                                try {
+                                    await window.screenShareAudioContext.close();
+                                } catch (e) {}
+                                window.screenShareAudioContext = null;
+                            }
+                            window.isScreenShareActive = false;
+                            window.isNativeActive = false;
+                        });
+                        
+                        return {
+                            success: true,
+                            streamId: screenShareStream.id,
+                            hasVideo: screenShareStream.getVideoTracks().length > 0,
+                            hasAudio: screenShareStream.getAudioTracks().length > 0
+                        };
+                        
+                    } catch (error) {
+                        console.error('[JITSI-VC] Error:', error);
+                        return { success: false, error: error.message };
+                    }
+                })();
+            `);
+            
+            if (result && result.success) {
+                await this.notifyScreenShareStart();
+            }
+
+            log.info(`[JITSI-VC] Hybrid stream result:`, result);
+            return result;
+            
+        } catch (error: any) {
+            log.error(`[JITSI-VC] createHybridStreamInJitsi ERROR: ${error.message}`);
+            return { success: false, error: error.message };
+        }
+    }
+
+    private setupAudioCallbacks(): void {
+        log.info("[JITSI-VC] setupAudioCallbacks");
+        
+        this.state.videoFrameCount = 0;
+        this.state.audioFrameCount = 0;
+        
+        this.nativeCapture.setFrameCallbacks(
+            // Video callback - игнорируем (используем Electron)
+            (videoData: any) => {
+                this.state.videoFrameCount = (this.state.videoFrameCount || 0) + 1;
+            },
+            
+            // Audio callback - обрабатываем
+            (audioData: any) => {
+                this.processNativeAudio(audioData);
+            }
+        );
+        
+        log.info("[JITSI-VC] setupAudioCallbacks DONE");
+    }
+
+    private processNativeAudio(audioData: any): void {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
+        
+        this.state.audioFrameCount = (this.state.audioFrameCount || 0) + 1;
+        
+        try {
+            const arrayBuffer = audioData.data;
+            const samples = this.audioProcessor.getSamplesForPlatform(audioData);
+            const channels = audioData.channels || 2;
+            
+            const { leftChannel, rightChannel } = this.audioProcessor.decodeAudio(
+                arrayBuffer, 
+                samples, 
+                channels
+            );
+            
+            const levels = this.audioProcessor.analyzeAudioLevels(leftChannel, rightChannel);
+            
+            const { processedLeft, processedRight } = this.audioProcessor.normalizeAudio(
+                leftChannel, 
+                rightChannel, 
+                levels
+            );
+            
+            this.sendAudioToJitsi(processedLeft, processedRight, samples);
+        } catch (error: any) {
+            log.error(`[JITSI-VC] processNativeAudio ERROR: ${error.message}`);
+        }
+    }
+
+    private sendAudioToJitsi(leftData: Float32Array, rightData: Float32Array, samples: number): void {
+        if (!this.state.window || this.state.window.isDestroyed()) return;
+        
+        const jsCode = getSendAudioToJitsiCode(leftData, rightData, samples);
+        
+        this.state.window.webContents.executeJavaScript(jsCode).catch((err) => {
+            log.error(`[JITSI-VC] sendAudioToJitsi error: ${err.message}`);
+        });
+    }
 
     private async notifyScreenShareStart(): Promise<void> {
         if (!this.state.window || this.state.window.isDestroyed()) return;
@@ -655,7 +948,9 @@ export class JitsiNativeManager {
         if (!this.config.enableDebugUI || this.debugMonitoringInterval) return;
         this.debugMonitoringInterval = setInterval(async () => {
             if (!this.state.window || this.state.window.isDestroyed()) {
-                clearInterval(this.debugMonitoringInterval);
+                if (this.debugMonitoringInterval) {
+                    clearInterval(this.debugMonitoringInterval as unknown as number);
+                }
                 this.debugMonitoringInterval = undefined;
                 return;
             }
@@ -682,7 +977,7 @@ export class JitsiNativeManager {
             
             // Используем функцию из video-quality-manager
             const result = await this.state.window.webContents.executeJavaScript(
-                getApplyQualityPresetCode(preset, presetName)
+                getApplyQualityPresetCode(preset, String(presetName))
             );
             
             if (result.success) {
