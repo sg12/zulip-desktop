@@ -18,6 +18,7 @@ export interface JitsiState {
     isStreamActive: boolean;
     streamId: string | null;
     lastSelectedSourceId?: string;
+    lastSelectedSourceName?: string | null; // 🆕 Имя выбранного источника для маршрутизации аудио
     videoFrameCount?: number;
     audioFrameCount?: number;
     qualityPreset?: string;

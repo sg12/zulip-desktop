@@ -150,8 +150,8 @@ export function getSourcePickerCode(): string {
                         dialog.style.opacity = '0';
                         setTimeout(() => {
                             overlay.remove();
-                            // Передаём ОБЪЕКТ: sourceId + флаг режима
-                            callback({ sourceId: source.id, useVirtualCable: useVC });
+                            // Передаём ОБЪЕКТ: sourceId + sourceName + флаг режима
+                            callback({ sourceId: source.id, sourceName: source.name, useVirtualCable: useVC });
                         }, 200);
                     };
                     
@@ -396,14 +396,14 @@ export function getSimplifiedScreenShareInterceptorCode(): string {
                                 return;
                             }
                             
-                            const { sourceId, useVirtualCable } = result;
+                            const { sourceId, sourceName, useVirtualCable } = result;
                             
                             try {
                                 // 🆕 Передаём режим Virtual Cable в main process
                                 await window.ipcRenderer.invoke('jitsi:set-virtual-cable-mode', useVirtualCable);
                                 
-                                // Сохраняем выбранный источник
-                                await window.ipcRenderer.invoke('jitsi:save-selected-source', sourceId);
+                                // Сохраняем выбранный источник с именем для маршрутизации аудио
+                                await window.ipcRenderer.invoke('jitsi:save-selected-source', sourceId, sourceName);
                                 
                                 // Создаем нативный поток
                                 const streamResult = await window.ipcRenderer.invoke('create-native-stream-for-jitsi');

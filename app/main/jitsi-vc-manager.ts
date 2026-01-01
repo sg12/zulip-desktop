@@ -32,7 +32,8 @@ export class JitsiNativeManager {
     private state: JitsiState = {
         window: null,
         isStreamActive: false,
-        streamId: null
+        streamId: null,
+        lastSelectedSourceName: null
     };
     private nativeCapture: NativeCaptureManager;
     private bundlePath: string;
@@ -101,9 +102,16 @@ export class JitsiNativeManager {
                 useVirtualCable: this.useVirtualCableMode
             };
         });
-        ipcMain.handle("jitsi:save-selected-source", async (event, sourceId: string) => {
+        ipcMain.handle("jitsi:save-selected-source", async (event, sourceId: string, sourceName?: string) => {
             this.state.lastSelectedSourceId = sourceId;
-            log.info(`Saved selected source: ${sourceId}`);
+            this.state.lastSelectedSourceName = sourceName || null;
+            log.info(`[VC-MODE] Saved selected source: ${sourceId} (${sourceName || 'unknown'})`);
+            
+            // Если Virtual Cable включён, попробуем найти и маршрутизировать аудио
+            if (this.useVirtualCableMode && sourceName) {
+                await this.tryAutoRouteAudio(sourceName);
+            }
+            
             return { success: true };
         });
         // 🆕 Обработчики для перенаправления звука приложения
@@ -1290,6 +1298,57 @@ export class JitsiNativeManager {
             
         } catch (error: any) {
             log.error(`[JITSI-NATIVE-MANAGER] Cleanup error: ${error.message}`);
+        }
+    }
+    
+    // 🆕 Автоматический поиск и маршрутизация аудио по имени источника
+    private async tryAutoRouteAudio(sourceName: string): Promise<void> {
+        try {
+            log.info(`[VC-MODE] 🔍 Trying to auto-route audio for: "${sourceName}"`);
+            
+            // Проверяем готовность SVV
+            const isReady = await this.audioSessionService.isReady();
+            if (!isReady) {
+                log.warn("[VC-MODE] ⚠️ SoundVolumeView not ready - cannot route audio");
+                log.warn("[VC-MODE] Audio will be captured from ALL apps going to VB-Cable");
+                return;
+            }
+            
+            // Получаем список аудио сессий
+            const sessions = await this.audioSessionService.getAudioSessions();
+            log.info(`[VC-MODE] Found ${sessions.length} audio sessions:`);
+            sessions.forEach(s => {
+                log.info(`[VC-MODE]   - ${s.processName} (${s.displayName}) - ${s.volume}%`);
+            });
+            
+            // Пытаемся найти совпадение по имени
+            const sourceNameLower = sourceName.toLowerCase();
+            const matchedSession = sessions.find(s => {
+                const processLower = s.processName.toLowerCase().replace('.exe', '');
+                const displayLower = s.displayName.toLowerCase();
+                return sourceNameLower.includes(processLower) || 
+                       sourceNameLower.includes(displayLower) ||
+                       processLower.includes(sourceNameLower.split(' ')[0]) ||
+                       displayLower.includes(sourceNameLower.split(' ')[0]);
+            });
+            
+            if (matchedSession) {
+                log.info(`[VC-MODE] ✅ Matched source "${sourceName}" to process "${matchedSession.processName}"`);
+                const result = await this.routeAppAudioToCable(matchedSession.processName);
+                if (result.success) {
+                    log.info(`[VC-MODE] ✅ Auto-routed ${matchedSession.processName} to VB-Cable`);
+                } else {
+                    log.warn(`[VC-MODE] ⚠️ Failed to auto-route: ${result.error}`);
+                }
+            } else {
+                log.warn(`[VC-MODE] ⚠️ No matching audio session found for "${sourceName}"`);
+                log.info("[VC-MODE] Available sessions for manual selection:");
+                sessions.forEach(s => {
+                    log.info(`[VC-MODE]   → ${s.processName}`);
+                });
+            }
+        } catch (error: any) {
+            log.error(`[VC-MODE] ❌ Auto-route error: ${error.message}`);
         }
     }
     

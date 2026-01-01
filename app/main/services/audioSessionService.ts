@@ -23,9 +23,36 @@ export interface AudioDevice {
 
 export class AudioSessionService {
     private svvLocator: SVVLocator;
+    private initialized: boolean = false;
 
     constructor() {
         this.svvLocator = new SVVLocator();
+        this.initialize();
+    }
+    
+    /**
+     * Асинхронная инициализация
+     */
+    private async initialize(): Promise<void> {
+        log.info("[AudioSession] 🔊 Initializing AudioSessionService...");
+        try {
+            const svvPath = await this.svvLocator.findSVV();
+            if (svvPath) {
+                log.info(`[AudioSession] ✅ SoundVolumeView ready at: ${svvPath}`);
+                const hasVC = await this.hasVBCable();
+                if (hasVC) {
+                    const vcName = await this.getVBCableDeviceName();
+                    log.info(`[AudioSession] ✅ VB-Cable found: ${vcName}`);
+                } else {
+                    log.warn("[AudioSession] ⚠️ VB-Cable NOT found via SVV");
+                }
+            } else {
+                log.warn("[AudioSession] ⚠️ SoundVolumeView not found - audio routing disabled");
+            }
+            this.initialized = true;
+        } catch (error: any) {
+            log.error("[AudioSession] ❌ Initialization error:", error.message);
+        }
     }
 
     /**
@@ -262,12 +289,16 @@ export class AudioSessionService {
      * Перенаправить звук приложения на устройство
      */
     async setAppAudioDevice(processName: string, deviceName: string): Promise<boolean> {
+        log.info(`[AudioSession] 🔀 Routing ${processName} → ${deviceName}`);
+        
         const svvPath = await this.getSVVPath();
         if (!svvPath) {
+            log.error("[AudioSession] ❌ Cannot route - SoundVolumeView not found");
             throw new Error("SoundVolumeView not found");
         }
 
         try {
+            log.info(`[AudioSession] Executing: ${svvPath} /SetAppDefault "${deviceName}" all "${processName}"`);
             await execFileAsync(
                 svvPath,
                 ["/SetAppDefault", deviceName, "all", processName],
@@ -276,10 +307,10 @@ export class AudioSessionService {
                 }
             );
 
-            log.info(`[AudioSession] Routed ${processName} to ${deviceName}`);
+            log.info(`[AudioSession] ✅ Successfully routed ${processName} to ${deviceName}`);
             return true;
         } catch (error: any) {
-            log.error(`[AudioSession] Error routing ${processName} to ${deviceName}:`, error);
+            log.error(`[AudioSession] ❌ Error routing ${processName} to ${deviceName}:`, error.message);
             throw new Error(`Failed to route audio: ${error.message}`);
         }
     }

@@ -16,32 +16,42 @@ export class SVVLocator {
      * Поиск SoundVolumeView.exe в системе
      */
     async findSVV(): Promise<string | null> {
+        log.info("[SVV] 🔍 Starting SoundVolumeView search...");
+        
         // 1. Проверяем сохранённый путь
         const savedPath = this.getSavedPath();
         if (savedPath && await this.isValidPath(savedPath)) {
             this.cachedPath = savedPath;
+            log.info(`[SVV] ✅ Found (cached): ${savedPath}`);
             return savedPath;
         }
 
         // 2. Поиск в PATH
+        log.info("[SVV] Searching in PATH...");
         const pathResult = await this.findInPath();
         if (pathResult) {
             this.cachedPath = pathResult;
             await this.savePath(pathResult);
+            log.info(`[SVV] ✅ Found in PATH: ${pathResult}`);
             return pathResult;
         }
 
         // 3. Проверка стандартных путей
         const standardPaths = this.getStandardPaths();
+        log.info(`[SVV] Searching in ${standardPaths.length} standard paths...`);
         for (const dir of standardPaths) {
             const fullPath = path.join(dir, "SoundVolumeView.exe");
             if (await this.isValidPath(fullPath)) {
                 this.cachedPath = fullPath;
                 await this.savePath(fullPath);
+                log.info(`[SVV] ✅ Found at: ${fullPath}`);
                 return fullPath;
             }
         }
 
+        log.warn("[SVV] ❌ SoundVolumeView NOT FOUND! Audio routing will not work.");
+        log.warn("[SVV] Download from: https://www.nirsoft.net/utils/sound_volume_view.html");
+        log.warn("[SVV] Extract to: tools/ folder in project root");
         return null;
     }
 
