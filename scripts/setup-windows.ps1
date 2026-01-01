@@ -1,19 +1,19 @@
-# Скрипт автоматической настройки для Windows
-# Запуск: PowerShell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
+# Script for Windows setup
+# Run: PowerShell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  Настройка проекта для Windows" -ForegroundColor Cyan
+Write-Host "  Windows Project Setup" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Проверка версий
-Write-Host "Проверка версий..." -ForegroundColor Yellow
+# Check versions
+Write-Host "Checking versions..." -ForegroundColor Yellow
 $nodeVersion = node -v 2>$null
 if ($nodeVersion) {
     Write-Host "[OK] Node.js: $nodeVersion" -ForegroundColor Green
 } else {
-    Write-Host "[ERROR] Node.js не установлен!" -ForegroundColor Red
-    Write-Host "  Скачайте с https://nodejs.org/" -ForegroundColor Yellow
+    Write-Host "[ERROR] Node.js is not installed!" -ForegroundColor Red
+    Write-Host "  Download from https://nodejs.org/" -ForegroundColor Yellow
     exit 1
 }
 
@@ -21,7 +21,7 @@ $npmVersion = npm -v 2>$null
 if ($npmVersion) {
     Write-Host "[OK] npm: $npmVersion" -ForegroundColor Green
 } else {
-    Write-Host "[ERROR] npm не найден!" -ForegroundColor Red
+    Write-Host "[ERROR] npm not found!" -ForegroundColor Red
     exit 1
 }
 
@@ -29,72 +29,72 @@ $pythonVersion = python --version 2>$null
 if ($pythonVersion) {
     Write-Host "[OK] Python: $pythonVersion" -ForegroundColor Green
 } else {
-    Write-Host "[WARNING] Python не установлен!" -ForegroundColor Red
-    Write-Host "  Скачайте с https://www.python.org/downloads/" -ForegroundColor Yellow
-    Write-Host "  Важно: Отметьте 'Add Python to PATH' при установке" -ForegroundColor Yellow
+    Write-Host "[WARNING] Python is not installed!" -ForegroundColor Red
+    Write-Host "  Download from https://www.python.org/downloads/" -ForegroundColor Yellow
+    Write-Host "  Important: Check 'Add Python to PATH' during installation" -ForegroundColor Yellow
 }
 
 Write-Host ""
 
-# Проверка VB-Cable
-Write-Host "Проверка VB-Audio Virtual Cable..." -ForegroundColor Yellow
+# Check VB-Cable
+Write-Host "Checking VB-Audio Virtual Cable..." -ForegroundColor Yellow
 $vcCheck = wmic sounddev get name 2>$null | Select-String -Pattern "cable|vb-audio" -CaseSensitive:$false
 if ($vcCheck) {
-    Write-Host "[OK] VB-Cable найден: $vcCheck" -ForegroundColor Green
+    Write-Host "[OK] VB-Cable found: $vcCheck" -ForegroundColor Green
 } else {
-    Write-Host "[WARNING] VB-Cable не найден" -ForegroundColor Yellow
-    Write-Host "  Скачайте с https://vb-audio.com/Cable/" -ForegroundColor Yellow
-    Write-Host "  После установки перезагрузите компьютер!" -ForegroundColor Yellow
+    Write-Host "[WARNING] VB-Cable not found" -ForegroundColor Yellow
+    Write-Host "  Download from https://vb-audio.com/Cable/" -ForegroundColor Yellow
+    Write-Host "  After installation, restart your computer!" -ForegroundColor Yellow
 }
 
 Write-Host ""
 
-# Установка зависимостей
-Write-Host "Установка npm зависимостей..." -ForegroundColor Yellow
+# Install dependencies
+Write-Host "Installing npm dependencies..." -ForegroundColor Yellow
 npm install
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[ERROR] Ошибка при установке зависимостей!" -ForegroundColor Red
+    Write-Host "[ERROR] Failed to install dependencies!" -ForegroundColor Red
     exit 1
 }
-Write-Host "[OK] Зависимости установлены" -ForegroundColor Green
+Write-Host "[OK] Dependencies installed" -ForegroundColor Green
 Write-Host ""
 
-# Компиляция Windows нативного модуля
-Write-Host "Компиляция Windows нативного модуля..." -ForegroundColor Yellow
+# Compile Windows native module
+Write-Host "Compiling Windows native module..." -ForegroundColor Yellow
 Push-Location native-addon\win
 
 if (Test-Path "package.json") {
     npm install
     $installExitCode = $LASTEXITCODE
     if ($installExitCode -ne 0) {
-        Write-Host "[WARNING] Ошибка при установке зависимостей addon" -ForegroundColor Yellow
+        Write-Host "[WARNING] Error installing addon dependencies" -ForegroundColor Yellow
     }
     
     npm run build
     $buildExitCode = $LASTEXITCODE
     if ($buildExitCode -eq 0) {
         if (Test-Path "build\Release\capture.node") {
-            Write-Host "[OK] Нативный модуль скомпилирован успешно" -ForegroundColor Green
-            Write-Host "  Файл: build\Release\capture.node" -ForegroundColor Gray
+            Write-Host "[OK] Native module compiled successfully" -ForegroundColor Green
+            Write-Host "  File: build\Release\capture.node" -ForegroundColor Gray
         } else {
-            Write-Host "[WARNING] Модуль скомпилирован, но файл не найден" -ForegroundColor Yellow
+            Write-Host "[WARNING] Module compiled but file not found" -ForegroundColor Yellow
         }
     } else {
-        Write-Host "[ERROR] Ошибка компиляции нативного модуля!" -ForegroundColor Red
-        Write-Host "  Убедитесь что установлены:" -ForegroundColor Yellow
+        Write-Host "[ERROR] Failed to compile native module!" -ForegroundColor Red
+        Write-Host "  Make sure you have installed:" -ForegroundColor Yellow
         Write-Host "  - Visual Studio Build Tools" -ForegroundColor Yellow
         Write-Host "  - Windows SDK" -ForegroundColor Yellow
-        Write-Host "  Или выполните: npm install -g windows-build-tools" -ForegroundColor Yellow
+        Write-Host "  Or run: npm install -g windows-build-tools" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "[WARNING] Папка native-addon\win не найдена" -ForegroundColor Yellow
+    Write-Host "[WARNING] native-addon\win folder not found" -ForegroundColor Yellow
 }
 
 Pop-Location
 Write-Host ""
 
-# Копирование модуля в dist-electron (если нужно)
-Write-Host "Проверка dist-electron..." -ForegroundColor Yellow
+# Copy module to dist-electron (if needed)
+Write-Host "Checking dist-electron..." -ForegroundColor Yellow
 $captureNodePath = "native-addon\win\build\Release\capture.node"
 if (Test-Path $captureNodePath) {
     if (-not (Test-Path "dist-electron")) {
@@ -102,15 +102,15 @@ if (Test-Path $captureNodePath) {
     }
     
     Copy-Item $captureNodePath "dist-electron\native-addon.node" -Force
-    Write-Host "[OK] Модуль скопирован в dist-electron\native-addon.node" -ForegroundColor Green
+    Write-Host "[OK] Module copied to dist-electron\native-addon.node" -ForegroundColor Green
 } else {
-    Write-Host "[WARNING] capture.node не найден, пропускаем копирование" -ForegroundColor Yellow
+    Write-Host "[WARNING] capture.node not found, skipping copy" -ForegroundColor Yellow
 }
 
 Write-Host ""
 
-# Проверка SoundVolumeView
-Write-Host "Проверка SoundVolumeView..." -ForegroundColor Yellow
+# Check SoundVolumeView
+Write-Host "Checking SoundVolumeView..." -ForegroundColor Yellow
 $svvPaths = @(
     "tools\SoundVolumeView.exe",
     "$env:LOCALAPPDATA\SoundVolumeView\SoundVolumeView.exe",
@@ -120,34 +120,34 @@ $svvPaths = @(
 $svvFound = $false
 foreach ($svvPath in $svvPaths) {
     if (Test-Path $svvPath) {
-        Write-Host "[OK] SoundVolumeView найден: $svvPath" -ForegroundColor Green
+        Write-Host "[OK] SoundVolumeView found: $svvPath" -ForegroundColor Green
         $svvFound = $true
         break
     }
 }
 
-# Проверка в PATH
+# Check in PATH
 if (-not $svvFound) {
     $svvInPath = Get-Command SoundVolumeView.exe -ErrorAction SilentlyContinue
     if ($svvInPath) {
-        Write-Host "[OK] SoundVolumeView найден в PATH: $($svvInPath.Source)" -ForegroundColor Green
+        Write-Host "[OK] SoundVolumeView found in PATH: $($svvInPath.Source)" -ForegroundColor Green
         $svvFound = $true
     }
 }
 
 if (-not $svvFound) {
-    Write-Host "[WARNING] SoundVolumeView не найден" -ForegroundColor Yellow
-    Write-Host "  Скачайте с https://www.nirsoft.net/utils/sound_volume_view.html" -ForegroundColor Yellow
-    Write-Host "  Распакуйте в tools\ или добавьте в PATH" -ForegroundColor Yellow
+    Write-Host "[WARNING] SoundVolumeView not found" -ForegroundColor Yellow
+    Write-Host "  Download from https://www.nirsoft.net/utils/sound_volume_view.html" -ForegroundColor Yellow
+    Write-Host "  Extract to tools\ or add to PATH" -ForegroundColor Yellow
 }
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  Настройка завершена!" -ForegroundColor Green
+Write-Host "  Setup completed!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Следующие шаги:" -ForegroundColor Yellow
-Write-Host "1. Если VB-Cable не найден - установите и перезагрузите компьютер" -ForegroundColor White
-Write-Host "2. Если SoundVolumeView не найден - скачайте и положите в tools\" -ForegroundColor White
-Write-Host "3. Запустите: npm start" -ForegroundColor White
+Write-Host "Next steps:" -ForegroundColor Yellow
+Write-Host "1. If VB-Cable not found - install and restart computer" -ForegroundColor White
+Write-Host "2. If SoundVolumeView not found - download and put in tools\" -ForegroundColor White
+Write-Host "3. Run: npm start" -ForegroundColor White
 Write-Host ""
