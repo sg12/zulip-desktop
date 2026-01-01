@@ -670,3 +670,38 @@ contextBridge.exposeInMainWorld("testUpdate", {
     });
   }
 });
+
+// === Audio Session API для работы с SoundVolumeView ===
+contextBridge.exposeInMainWorld("audioApi", {
+  checkReady: async () => {
+    return await ipcRenderer.invoke("audio:checkReady");
+  },
+  
+  getSessions: async () => {
+    return await ipcRenderer.invoke("audio:getSessions");
+  },
+  
+  getDevices: async () => {
+    return await ipcRenderer.invoke("audio:getDevices");
+  },
+  
+  routeToCable: async (processName: string) => {
+    return await ipcRenderer.invoke("audio:routeToCable", processName);
+  },
+  
+  restoreDefault: async (processName: string) => {
+    return await ipcRenderer.invoke("audio:restoreDefault", processName);
+  },
+  
+  setManualPath: async (exePath: string) => {
+    return await ipcRenderer.invoke("audio:setManualPath", exePath);
+  },
+  
+  hasVBCable: async () => {
+    return await ipcRenderer.invoke("audio:hasVBCable");
+  },
+  
+  getSVVPath: async () => {
+    return await ipcRenderer.invoke("audio:getSVVPath");
+  }
+});

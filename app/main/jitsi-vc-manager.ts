@@ -18,6 +18,7 @@ import { JitsiWindowUtils } from "./jitsi-window-utils";
 import { JitsiOptions, JitsiState, JitsiManagerConfig } from './jitsi-types';
 import { JitsiURLBuilder } from './jitsi-url-builder';
 import { getSimplifiedScreenShareInterceptorCode } from "./electron-custom-source-picker";
+import { AudioSessionService } from "./services/audioSessionService.js";
 
 const DEFAULT_CONFIG: JitsiManagerConfig = {
     videoQuality: 'MEDIUM',
@@ -44,6 +45,8 @@ export class JitsiNativeManager {
     private activeMediaStreams: Set<string> = new Set(); 
     private debugMonitoringInterval?: NodeJS.Timer;
     private useVirtualCableMode: boolean = false; // 🆕 Флаг режима Virtual Cable
+    private routedProcessName: string | null = null; // 🆕 Имя процесса, звук которого перенаправлен на VC
+    private audioSessionService: AudioSessionService; // 🆕 Сервис для работы с SoundVolumeView
 
     constructor(
         nativeCapture: NativeCaptureManager,
@@ -59,6 +62,7 @@ export class JitsiNativeManager {
         this.audioProcessor = new AudioProcessor();
         this.uiManager = new JitsiUIManager();
         this.jitsiUtils = new JitsiWindowUtils();
+        this.audioSessionService = new AudioSessionService();
         if (this.config.videoQuality) {
             this.videoQualityManager.setPreset(this.config.videoQuality);
         }
@@ -100,6 +104,13 @@ export class JitsiNativeManager {
             this.state.lastSelectedSourceId = sourceId;
             log.info(`Saved selected source: ${sourceId}`);
             return { success: true };
+        });
+        // 🆕 Обработчики для перенаправления звука приложения
+        ipcMain.handle("jitsi:route-app-audio-to-cable", async (event, processName: string) => {
+            return await this.routeAppAudioToCable(processName);
+        });
+        ipcMain.handle("jitsi:restore-app-audio", async (event, processName: string) => {
+            return await this.restoreAppAudio(processName);
         });
         ipcMain.handle("jitsi:get-config", async () => {
             return this.getConfig();
@@ -761,6 +772,11 @@ export class JitsiNativeManager {
         log.info("[JITSI-NATIVE-MANAGER] Starting cleanup...");
         
         try {
+            // 🆕 Восстанавливаем звук приложения, если был перенаправлен
+            if (this.routedProcessName) {
+                await this.restoreAppAudio(this.routedProcessName);
+            }
+            
             if(this.state.window){
                 await JitsiWindowUtils.nukeClearAllStreams(this.state.window);
 
@@ -779,9 +795,10 @@ export class JitsiNativeManager {
                 this.state.videoFrameCount = 0;
                 this.state.audioFrameCount = 0;
                 this.activeMediaStreams.clear();
+                this.routedProcessName = null;
 
                 if (this.debugMonitoringInterval) {
-                    clearInterval(this.debugMonitoringInterval);
+                    clearInterval(this.debugMonitoringInterval as NodeJS.Timeout);
                     this.debugMonitoringInterval = undefined;
                 }
             }
@@ -790,6 +807,49 @@ export class JitsiNativeManager {
             
         } catch (error: any) {
             log.error(`[JITSI-NATIVE-MANAGER] Cleanup error: ${error.message}`);
+        }
+    }
+    
+    // 🆕 Метод для перенаправления звука приложения на VB-Cable
+    private async routeAppAudioToCable(processName: string): Promise<{ success: boolean; error?: string }> {
+        try {
+            if (!this.useVirtualCableMode) {
+                return { success: false, error: "Virtual Cable mode is not enabled" };
+            }
+            
+            const vcDeviceName = await this.audioSessionService.getVBCableDeviceName();
+            if (!vcDeviceName) {
+                return { success: false, error: "VB-Cable device not found" };
+            }
+            
+            const success = await this.audioSessionService.setAppAudioDevice(processName, vcDeviceName);
+            if (success) {
+                this.routedProcessName = processName;
+                log.info(`[VC-MODE] ✅ Routed ${processName} audio to ${vcDeviceName}`);
+            }
+            
+            return { success };
+        } catch (error: any) {
+            log.error(`[VC-MODE] Error routing ${processName} audio:`, error);
+            return { success: false, error: error.message };
+        }
+    }
+    
+    // 🆕 Метод для восстановления звука приложения на устройство по умолчанию
+    private async restoreAppAudio(processName: string): Promise<{ success: boolean; error?: string }> {
+        try {
+            const success = await this.audioSessionService.restoreDefaultDevice(processName);
+            if (success) {
+                if (this.routedProcessName === processName) {
+                    this.routedProcessName = null;
+                }
+                log.info(`[VC-MODE] ✅ Restored ${processName} audio to default device`);
+            }
+            
+            return { success };
+        } catch (error: any) {
+            log.error(`[VC-MODE] Error restoring ${processName} audio:`, error);
+            return { success: false, error: error.message };
         }
     }
 

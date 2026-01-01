@@ -43,6 +43,7 @@ const { setupScreenSharingMain } = require('@jitsi/electron-sdk');
 import { NativeCaptureManager } from './native-capture';
 // import { JitsiNativeManager } from './jitsi-native-manager';
 import { JitsiNativeManager } from './jitsi-vc-manager';
+import { registerAudioHandlers } from './ipc/audioHandlers.js';
 
 import * as fs from 'fs';
 import * as https from 'https';
@@ -428,6 +429,9 @@ async function createMainWindow(): Promise<BrowserWindow> {
   ses.setUserAgent(`ZulipElectron/${app.getVersion()} ${ses.getUserAgent()}`);
 
   // 3. РЕГИСТРИРУЕМ ВСЕ IPC ОБРАБОТЧИКИ ДО СОЗДАНИЯ ОКНА
+  
+  // Регистрация обработчиков для работы с аудио (SoundVolumeView)
+  registerAudioHandlers();
 
   let isNativeCapturing: boolean = false;
   let frameCollectionInterval: NodeJS.Timeout | null = null;
