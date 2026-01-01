@@ -389,11 +389,199 @@ export class JitsiNativeManager {
 
             await this.state.window.webContents.executeJavaScript(`
                 (function() {
-                    if (window.jitsiHandlersInjected) return;
+                    if (window.jitsiHandlersInjected) {
+                        console.log('[JitsiNative] Handlers already injected');
+                        return;
+                    }
                     window.jitsiHandlersInjected = true;
-                    // ... (оставляем оригинальный код инъекции без изменений)
-                    // Полный код из оригинального файла остаётся здесь
-                    // (для краткости опущен — он идентичен вашему текущему)
+                    
+                    console.log('[JitsiNative] Starting complete injection...');
+                    
+                    const originalFunctions = {
+                        openDesktopPicker: null,
+                        obtainDesktopStream: null,
+                        createLocalTracks: null,
+                        getDisplayMedia: null,
+                        getUserMedia: null
+                    };
+                    
+                    // Перехват JitsiMeetJS.createLocalTracks
+                    if (window.JitsiMeetJS && window.JitsiMeetJS.createLocalTracks) {
+                        console.log('[JitsiNative] Saving original createLocalTracks');
+                        originalFunctions.createLocalTracks = window.JitsiMeetJS.createLocalTracks;
+                        
+                        window.JitsiMeetJS.createLocalTracks = async function(options) {
+                            console.log('[JitsiNative] createLocalTracks intercepted, options:', options);
+                            
+                            let savedMic = null;
+                            try {
+                                const currentTracks = window.APP?.conference?.getLocalTracks?.() || [];
+                                savedMic = currentTracks.find(t => t.type === 'audio' && t.videoType !== 'desktop');
+                            } catch (e) {}
+
+                            if (options && options.devices && options.devices.includes('desktop')) {
+                                console.log('[JitsiNative] Desktop track requested');
+                                
+                                if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                                    console.log('[JitsiNative] Native stream available, injecting it...');
+                                    
+                                    try {
+                                        const tempGetUserMedia = navigator.mediaDevices.getUserMedia;
+                                        const tempGetDisplayMedia = navigator.mediaDevices.getDisplayMedia;
+                                        
+                                        navigator.mediaDevices.getUserMedia = async function(constraints) {
+                                            if (window.__creatingHybridStream) {
+                                                return originalFunctions.getUserMedia.call(this, constraints);
+                                            }
+                                            if (constraints && constraints.video && 
+                                                constraints.video.mandatory && 
+                                                constraints.video.mandatory.chromeMediaSource === 'desktop') {
+                                                console.log('[JitsiNative] Returning native stream for desktop getUserMedia');
+                                                return window.jitsiNativeMediaStream;
+                                            }
+                                            return tempGetUserMedia.call(this, constraints);
+                                        };
+                                        
+                                        navigator.mediaDevices.getDisplayMedia = async function(constraints) {
+                                            console.log('[JitsiNative] RETURNING NATIVE STREAM!');
+                                            return window.jitsiNativeMediaStream;
+                                        };
+                                        
+                                        const tracks = await originalFunctions.createLocalTracks.call(this, options);
+                                        
+                                        navigator.mediaDevices.getUserMedia = tempGetUserMedia;
+                                        navigator.mediaDevices.getDisplayMedia = tempGetDisplayMedia;
+                                        
+                                        if (tracks && tracks.length > 0) {
+                                            console.log('[JitsiNative] JitsiLocalTrack created successfully');
+                                            
+                                            setTimeout(async () => {
+                                                if (savedMic && !savedMic.isDisposed()) {
+                                                    try {
+                                                        const current = window.APP?.conference?.getLocalTracks?.() || [];
+                                                        const hasMic = current.some(t => 
+                                                            t.type === 'audio' && 
+                                                            t.videoType !== 'desktop'
+                                                        );
+                                                        
+                                                        if (!hasMic) {
+                                                            console.log('[JitsiNative] Re-adding microphone after desktop track');
+                                                            await window.APP.conference.addTrack(savedMic);
+                                                        }
+                                                    } catch (e) {
+                                                        console.error('[JitsiNative] Failed to restore mic:', e);
+                                                    }
+                                                }
+                                            }, 500);
+
+                                            const originalDispose = tracks[0].dispose;
+                                            tracks[0].dispose = function() {
+                                                console.log('[JitsiNative] Track dispose called');
+                                                window.isNativeActive = false;
+                                                if (originalDispose) {
+                                                    return originalDispose.call(this);
+                                                }
+                                            };
+                                        }
+                                        
+                                        return tracks;
+                                        
+                                    } catch (e) {
+                                        console.error('[JitsiNative] Error in createLocalTracks:', e);
+                                        throw e;
+                                    }
+                                }
+                            }
+                            
+                            return originalFunctions.createLocalTracks.call(this, options);
+                        };
+                        
+                        console.log('[JitsiNative] createLocalTracks intercepted');
+                    }
+                    
+                    // Перехват JitsiMeetScreenObtainer
+                    if (window.JitsiMeetScreenObtainer) {
+                        console.log('[JitsiNative] Setting up JitsiMeetScreenObtainer interceptors');
+                        
+                        if (window.JitsiMeetScreenObtainer.openDesktopPicker) {
+                            originalFunctions.openDesktopPicker = window.JitsiMeetScreenObtainer.openDesktopPicker;
+                            
+                            window.JitsiMeetScreenObtainer.openDesktopPicker = function(options, callback) {
+                                console.log('[JitsiNative] openDesktopPicker intercepted');
+                                
+                                if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                                    console.log('[JitsiNative] Native stream active, auto-selecting');
+                                    setTimeout(() => {
+                                        const sourceId = 'native:stream:' + Date.now();
+                                        callback(sourceId, { audio: true, screenShareAudio: true });
+                                    }, 100);
+                                    return;
+                                }
+                                
+                                console.log('[JitsiNative] No native stream, letting main interceptor handle');
+                            };
+                        }
+                        
+                        if (window.JitsiMeetScreenObtainer.obtainDesktopStream) {
+                            originalFunctions.obtainDesktopStream = window.JitsiMeetScreenObtainer.obtainDesktopStream;
+                            
+                            window.JitsiMeetScreenObtainer.obtainDesktopStream = function(sourceId, callback, errorCallback) {
+                                console.log('[JitsiNative] obtainDesktopStream intercepted');
+                                
+                                if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                                    console.log('[JitsiNative] Returning native stream');
+                                    setTimeout(() => {
+                                        callback(window.jitsiNativeMediaStream);
+                                    }, 100);
+                                    return;
+                                }
+                                
+                                return originalFunctions.obtainDesktopStream.call(this, sourceId, callback, errorCallback);
+                            };
+                        }
+                        
+                        console.log('[JitsiNative] JitsiMeetScreenObtainer intercepted');
+                    }
+                    
+                    // Глобальные перехваты
+                    if (!window.originalGetDisplayMedia) {
+                        originalFunctions.getDisplayMedia = navigator.mediaDevices.getDisplayMedia;
+                        window.originalGetDisplayMedia = originalFunctions.getDisplayMedia;
+                        
+                        navigator.mediaDevices.getDisplayMedia = async function(constraints) {
+                            console.log('[JitsiNative] Global getDisplayMedia intercepted');
+                            
+                            if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                                console.log('[JitsiNative] Returning native stream');
+                                return window.jitsiNativeMediaStream;
+                            }
+                            
+                            return originalFunctions.getDisplayMedia.call(this, constraints);
+                        };
+                    }
+                    
+                    if (!window.originalGetUserMedia) {
+                        originalFunctions.getUserMedia = navigator.mediaDevices.getUserMedia;
+                        window.originalGetUserMedia = originalFunctions.getUserMedia;
+                        
+                        navigator.mediaDevices.getUserMedia = async function(constraints) {
+                            if (constraints && constraints.video && 
+                                constraints.video.mandatory && 
+                                constraints.video.mandatory.chromeMediaSource === 'desktop') {
+                                console.log('[JitsiNative] Global getUserMedia for desktop intercepted');
+                                
+                                if (window.jitsiNativeMediaStream && window.isNativeActive) {
+                                    console.log('[JitsiNative] Returning native stream');
+                                    return window.jitsiNativeMediaStream;
+                                }
+                            }
+                            
+                            return originalFunctions.getUserMedia.call(this, constraints);
+                        };
+                    }
+                    
+                    console.log('[JitsiNative] Complete injection finished!');
+                    return true;
                 })();
             `);
 
