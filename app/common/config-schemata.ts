@@ -22,6 +22,8 @@ export const configSchemata = {
   enableSpellchecker: z.boolean(),
   errorReporting: z.boolean(),
   lastActiveTab: z.number(),
+  pendingUpdate: z.any().nullable(),
+  postponedUpdate: z.any().nullable(),
   promptDownload: z.boolean(),
   proxyBypass: z.string(),
   // eslint-disable-next-line @typescript-eslint/naming-convention
