@@ -302,8 +302,6 @@ async function createMainWindow(): Promise<BrowserWindow> {
       });
   });
 
-    await win.loadFile(path.join(__dirname, '..', 'app', 'renderer', 'main.html'));
-
     await win.loadURL(mainUrl).then(() => {
         console.log('✅ Окно создано!');
         if (ConfigUtil.getConfigItem('startMinimized', false)) {
