@@ -49,8 +49,13 @@ const electron_bridge: ElectronBridge = {
   },
 
   on_event(eventName: string, listener: ListenerType): void {
-    // ipcRenderer.send("preload-log", `Bridge: Установка слушателя события: ${eventName}`);
+    ipcRenderer.send("preload-log", `🔔 Bridge: Сайт слушает событие: ${eventName}`);
     bridgeEvents.on(eventName, listener);
+  },
+  
+  // Alias для совместимости
+  emit_event: (eventName: string | symbol, ...arguments_: unknown[]): boolean => {
+    return bridgeEvents.emit(eventName, ...arguments_);
   },
 
   new_notification: (

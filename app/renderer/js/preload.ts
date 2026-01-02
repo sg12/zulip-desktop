@@ -141,6 +141,16 @@ contextBridge.exposeInMainWorld("ipcRenderer", {
     }
 });
 
+// Expose Electron capabilities for Zulip to check
+contextBridge.exposeInMainWorld("electronCapabilities", {
+    supportsNativeJitsi: true,
+    supportsScreenShare: true,
+    supportsVirtualCable: true,
+    version: "5.26.2"
+});
+
+ipcRenderer.send("preload-log", "✅ Electron capabilities exposed to window");
+
 // === ОСТАЛЬНЫЕ ОБРАБОТЧИКИ СОБЫТИЙ ===
 
 ipcRenderer.on("logout", () => {

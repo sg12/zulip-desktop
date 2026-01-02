@@ -464,6 +464,18 @@ async function createMainWindow(): Promise<BrowserWindow> {
     _isOnline(url, ses),
   );
 
+  // Handler для проверки поддержки Jitsi (сайт может проверять это)
+  ipcMain.handle("check-jitsi-support", async () => {
+      log.info("🎯[Jitsi] Сайт проверяет поддержку Jitsi");
+      return {
+          supported: true,
+          nativeWindow: true,
+          screenShare: true,
+          virtualCable: true,
+          version: "5.26.2"
+      };
+  });
+
   ipcMain.handle("jitsi:set-virtual-cable-mode", async (event, enabled: boolean) => {
       // 🔧 ИСПРАВЛЕНИЕ: Синхронизируем глобальную переменную
       useVirtualCableMode = enabled;

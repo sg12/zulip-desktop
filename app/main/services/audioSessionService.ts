@@ -367,19 +367,31 @@ export class AudioSessionService {
     }
 
     /**
-     * Получить имя VB-Cable устройства
+     * Получить имя VB-Cable устройства для ВОСПРОИЗВЕДЕНИЯ (куда направлять звук)
+     * Это "CABLE Input" - playback device
      */
     async getVBCableDeviceName(): Promise<string | null> {
         try {
             const devices = await this.getAudioDevices();
+            log.info(`[AudioSession] 🔍 Looking for VB-Cable PLAYBACK device among ${devices.length} devices:`);
+            devices.forEach(d => log.info(`[AudioSession]   - "${d.name}"`));
+            
+            // Ищем CABLE Input - это playback устройство куда SoundVolumeView направляет звук
             const vcDevice = devices.find(
                 (d) =>
                     d.name.toLowerCase().includes("cable input") ||
                     d.name.toLowerCase().includes("vb-audio virtual cable")
             );
 
+            if (vcDevice) {
+                log.info(`[AudioSession] ✅ Found VB-Cable PLAYBACK device: "${vcDevice.name}"`);
+            } else {
+                log.warn("[AudioSession] ⚠️ VB-Cable PLAYBACK device not found");
+            }
+
             return vcDevice?.name || null;
-        } catch {
+        } catch (error: any) {
+            log.error(`[AudioSession] ❌ Error getting VB-Cable device: ${error.message}`);
             return null;
         }
     }

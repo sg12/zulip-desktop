@@ -727,60 +727,75 @@ export class JitsiNativeManager {
                             }
                         });
 
-                        // 2. Захват АУДИО с виртуального кабеля
+                        // 2. Захват АУДИО с виртуального кабеля (CABLE Output)
+                        // ВАЖНО: CABLE Input - это куда идёт звук (playback)
+                        //        CABLE Output - это откуда захватываем (recording)
                         let audioStream;
                         try {
                             const devices = await navigator.mediaDevices.enumerateDevices();
                             
-                            // Логируем все аудиоустройства для диагностики
+                            // Логируем ВСЕ аудиоустройства для диагностики
                             const audioInputs = devices.filter(d => d.kind === 'audioinput');
-                            console.log('[VC-MODE] Available audio input devices:', 
-                                audioInputs.map(d => ({ label: d.label, id: d.deviceId.substring(0, 8) }))
-                            );
+                            console.log('[VC-MODE] 🔊 ALL audio INPUT (recording) devices:');
+                            audioInputs.forEach((d, i) => {
+                                console.log('[VC-MODE]   ' + i + ': "' + d.label + '" (id: ' + d.deviceId.substring(0, 12) + ')');
+                            });
                             
-                            // Расширенный список паттернов для поиска Virtual Cable
+                            // Паттерны для CABLE Output (устройство записи)
+                            // На Windows VB-Cable показывает "CABLE Output (VB-Audio Virtual Cable)" как input device
                             const vcPatterns = [
-                                'cable input',      // VB-Audio Virtual Cable
-                                'cable output',     // VB-Audio Virtual Cable (output mode)
-                                'voicemeeter',      // VoiceMeeter
-                                'vb-audio',         // VB-Audio products
-                                'virtual audio',    // Generic virtual audio
-                                'virtual cable',    // Generic
-                                'blackhole',        // macOS BlackHole (на всякий случай)
-                                'soundflower'       // macOS Soundflower (legacy)
+                                'cable output',     // 🎯 Приоритет! Это то что нам нужно
+                                'vb-audio virtual cable',
+                                'cable input',      // Fallback (иногда так называется)
+                                'voicemeeter',      
+                                'vb-audio',         
+                                'virtual audio',    
+                                'virtual cable',    
+                                'blackhole',        
+                                'soundflower'       
                             ];
                             
-                            const vcDevice = audioInputs.find(d => {
+                            // Сначала ищем точное совпадение с "cable output"
+                            let vcDevice = audioInputs.find(d => 
+                                d.label.toLowerCase().includes('cable output')
+                            );
+                            
+                            // Если не нашли, ищем по остальным паттернам
+                            if (!vcDevice) {
+                                vcDevice = audioInputs.find(d => {
                                 const label = d.label.toLowerCase();
                                 return vcPatterns.some(pattern => label.includes(pattern));
                             });
+                            }
                             
                             if (vcDevice) {
-                                console.log('[VC-MODE] ✅ Found Virtual Cable device:', vcDevice.label);
+                                console.log('[VC-MODE] ✅ Found Virtual Cable RECORDING device: "' + vcDevice.label + '"');
                                 audioStream = await navigator.mediaDevices.getUserMedia({
                                     audio: { 
                                         deviceId: { exact: vcDevice.deviceId },
-                                        echoCancellation: false,  // Отключаем обработку - не нужна для системного звука
+                                        echoCancellation: false,
                                         noiseSuppression: false,
-                                        autoGainControl: false
+                                        autoGainControl: false,
+                                        sampleRate: 48000,
+                                        channelCount: 2
                                     },
                                     video: false
                                 });
-                                console.log('[VC-MODE] ✅ Audio stream acquired successfully');
+                                console.log('[VC-MODE] ✅ Audio stream acquired from: "' + vcDevice.label + '"');
+                                console.log('[VC-MODE] 🎵 Audio tracks: ' + audioStream.getAudioTracks().length);
                             } else {
-                                // Детальная ошибка с информацией об устройствах
-                                const deviceList = audioInputs.map(d => d.label).join(', ') || 'none found';
-                                console.error('[VC-MODE] ❌ Virtual Cable not found');
-                                console.error('[VC-MODE] Available devices:', deviceList);
+                                const deviceList = audioInputs.map(d => '"' + d.label + '"').join(', ') || 'none found';
+                                console.error('[VC-MODE] ❌ Virtual Cable OUTPUT not found!');
+                                console.error('[VC-MODE] Available recording devices: ' + deviceList);
+                                console.error('[VC-MODE] 💡 Make sure VB-Cable is installed and "CABLE Output" is visible in Sound settings > Recording');
                                 throw new Error(
-                                    'Virtual Cable device not found. ' +
-                                    'Please install VB-Audio Virtual Cable from https://vb-audio.com/Cable/ ' +
-                                    'Available devices: ' + deviceList
+                                    'Virtual Cable OUTPUT not found. ' +
+                                    'Install VB-Cable from https://vb-audio.com/Cable/ ' +
+                                    'Available: ' + deviceList
                                 );
                             }
                         } catch (e) {
                             console.error('[VC-MODE] ❌ Audio capture failed:', e);
-                            // Пробрасываем оригинальную ошибку с дополнительным контекстом
                             const errorMessage = e instanceof Error ? e.message : String(e);
                             throw new Error('Failed to capture audio from Virtual Cable: ' + errorMessage);
                         }
