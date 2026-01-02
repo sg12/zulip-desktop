@@ -302,6 +302,24 @@ async function createMainWindow(): Promise<BrowserWindow> {
       });
   });
 
+    // Ждём готовности файла (в dev режиме Vite может не успеть)
+    const htmlPath = path.join(__dirname, 'app', 'renderer', 'main.html');
+    let waitAttempts = 0;
+    const maxWaitAttempts = 30; // 3 секунды максимум
+    
+    while (!fs.existsSync(htmlPath) && waitAttempts < maxWaitAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        waitAttempts++;
+        if (waitAttempts % 10 === 0) {
+            console.log(`⏳ Waiting for build... (${waitAttempts / 10}s)`);
+        }
+    }
+    
+    if (!fs.existsSync(htmlPath)) {
+        console.error(`❌ HTML file not found: ${htmlPath}`);
+        console.error('Try running: npm run build-only');
+    }
+    
     await win.loadURL(mainUrl).then(() => {
         console.log('✅ Окно создано!');
         if (ConfigUtil.getConfigItem('startMinimized', false)) {
