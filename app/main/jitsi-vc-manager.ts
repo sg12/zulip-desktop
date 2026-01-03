@@ -679,7 +679,8 @@ export class JitsiNativeManager {
 
         try {
             if (this.useVirtualCableMode) {
-                // 🆕 Режим Virtual Cable: захват только видео + аудио с виртуального устройства
+                // 🆕 Режим Virtual Cable: видео от Electron + аудио с VB-Cable
+                log.info("[VC-MODE] 🎛️ Virtual Cable mode - using Electron video + VB-Cable audio");
                 const result = await this.createVirtualCableHybridStream(electronSourceId);
                 if (result.success) {
                     this.state.isStreamActive = true;
@@ -689,26 +690,108 @@ export class JitsiNativeManager {
                 }
                 return result;
             } else {
-                // Стандартный нативный режим
-                const audioResult = await this.startNativeAudioCapture(electronSourceId);
-                if (!audioResult.success) return { success: false, error: audioResult.error };
-
-                const streamResult = await this.createHybridStreamInJitsi(electronSourceId);
-                if (!streamResult?.success) {
-                    await this.nativeCapture.stopCapture();
-                    return { success: false, error: streamResult?.error || "Stream creation failed" };
-                }
-
-                this.setupAudioCallbacks();
+                // 🎯 Стандартный режим: полностью через Jitsi SDK (видео + аудио от системы)
+                log.info("[STANDARD-MODE] 🎬 Using Jitsi SDK standard screen capture");
+                const result = await this.createJitsiStandardStream(electronSourceId);
+                if (result.success) {
                 this.state.isStreamActive = true;
-                this.state.streamId = streamResult.streamId;
-                return streamResult;
+                    this.state.streamId = result.streamId;
+                    log.info("[STANDARD-MODE] ✅ Standard Jitsi stream created successfully");
+                }
+                return result;
             }
         } catch (error: any) {
             log.error(`[JITSI-NATIVE-MANAGER] Error: ${error.message}`);
-            if (!this.useVirtualCableMode) {
-                await this.nativeCapture.stopCapture();
+            return { success: false, error: error.message };
+        }
+    }
+
+    // 🆕 Стандартный режим: Jitsi SDK захват экрана (видео + системный звук)
+    private async createJitsiStandardStream(electronSourceId: string): Promise<any> {
+        log.info(`[STANDARD-MODE] Creating standard Jitsi stream`);
+        if (!this.state.window || this.state.window.isDestroyed()) {
+            return { success: false, error: "No window" };
+        }
+
+        const qualitySettings = this.videoQualityManager.getCurrentSettings();
+
+        try {
+            const result = await this.state.window.webContents.executeJavaScript(`
+                (async function() {
+                    console.log('[STANDARD-MODE] 🎬 Starting standard screen capture...');
+                    const startTime = performance.now();
+                    
+                    try {
+                        // Очистка предыдущих потоков
+                        if (window.jitsiNativeMediaStream) {
+                            window.jitsiNativeMediaStream.getTracks().forEach(t => t.stop());
+                            window.jitsiNativeMediaStream = null;
+                        }
+
+                        // Захват экрана со звуком через стандартный Electron API
+                        const stream = await navigator.mediaDevices.getUserMedia({
+                            audio: {
+                                mandatory: {
+                                    chromeMediaSource: 'desktop'
+                                }
+                            },
+                            video: {
+                                mandatory: {
+                                    chromeMediaSource: 'desktop',
+                                    chromeMediaSourceId: '${electronSourceId}',
+                                    minWidth: ${qualitySettings.width.min},
+                                    maxWidth: ${qualitySettings.width.max},
+                                    minHeight: ${qualitySettings.height.min},
+                                    maxHeight: ${qualitySettings.height.max},
+                                    minFrameRate: ${qualitySettings.frameRate.min},
+                                    maxFrameRate: ${qualitySettings.frameRate.max}
+                                }
+                            }
+                        });
+
+                        const videoTracks = stream.getVideoTracks();
+                        const audioTracks = stream.getAudioTracks();
+                        
+                        console.log('[STANDARD-MODE] 📊 Captured tracks: ' + videoTracks.length + ' video, ' + audioTracks.length + ' audio');
+                        
+                        if (videoTracks.length === 0) {
+                            throw new Error('No video track captured');
+                        }
+
+                        // Получаем информацию о видео
+                        const videoSettings = videoTracks[0].getSettings();
+                        console.log('[STANDARD-MODE] 📐 Video: ' + videoSettings.width + 'x' + videoSettings.height + ' @ ' + videoSettings.frameRate + 'fps');
+
+                        window.jitsiNativeMediaStream = stream;
+                        window.isNativeActive = true;
+                        window.isScreenShareActive = true;
+                        window.isHybridMode = false;
+                        window.isVirtualCableMode = false;
+
+                        const totalTime = performance.now() - startTime;
+                        console.log('[STANDARD-MODE] ✅ Stream created in ' + totalTime.toFixed(0) + 'ms');
+                        
+                        return { 
+                            success: true, 
+                            streamId: stream.id,
+                            hasAudio: audioTracks.length > 0
+                        };
+                    } catch (error) {
+                        console.error('[STANDARD-MODE] ❌ Error:', error);
+                        return { success: false, error: error.message };
+                    }
+                })();
+            `);
+
+            if (result.success) {
+                await this.notifyScreenShareStart();
+                if (!result.hasAudio) {
+                    log.warn("[STANDARD-MODE] ⚠️ No system audio captured - this is normal for window capture");
+                }
             }
+            return result;
+        } catch (error: any) {
+            log.error(`[STANDARD-MODE] createJitsiStandardStream ERROR: ${error.message}`);
             return { success: false, error: error.message };
         }
     }
@@ -873,7 +956,18 @@ export class JitsiNativeManager {
                             const targetHeight = 1080;
                             canvas.width = targetWidth;
                             canvas.height = targetHeight;
-                            const ctx = canvas.getContext('2d');
+                            
+                            // Используем willReadFrequently для оптимизации
+                            const ctx = canvas.getContext('2d', { 
+                                alpha: false,           // Без альфа-канала - быстрее
+                                willReadFrequently: false,
+                                desynchronized: true    // Отключаем синхронизацию для низкой задержки
+                            });
+                            
+                            // ⚠️ ВАЖНО: Сразу заполняем canvas чёрным, чтобы не было зелёного фона!
+                            ctx.fillStyle = '#000000';
+                            ctx.fillRect(0, 0, targetWidth, targetHeight);
+                            console.log('[VC-MODE] 🖤 Canvas initialized with black background');
                             
                             // Создаём video элемент для отрисовки
                             const videoElement = document.createElement('video');
@@ -902,30 +996,50 @@ export class JitsiNativeManager {
                                 offsetY = 0;
                             }
                             
+                            console.log('[VC-MODE] 📏 Draw params: ' + drawWidth.toFixed(0) + 'x' + drawHeight.toFixed(0) + ' at (' + offsetX.toFixed(0) + ',' + offsetY.toFixed(0) + ')');
+                            
+                            // Отрисовываем первый кадр синхронно!
+                            ctx.fillStyle = '#000000';
+                            ctx.fillRect(0, 0, targetWidth, targetHeight);
+                            ctx.drawImage(videoElement, offsetX, offsetY, drawWidth, drawHeight);
+                            
                             // Функция отрисовки кадра
+                            let frameCount = 0;
                             function drawFrame() {
-                                if (!window.isScreenShareActive) return;
+                                if (!window.isScreenShareActive) {
+                                    console.log('[VC-MODE] 🛑 Screen share stopped, ending draw loop');
+                                    return;
+                                }
                                 
-                                // Чёрный фон
+                                // Чёрный фон - ПОЛНОСТЬЮ заполняем
                                 ctx.fillStyle = '#000000';
                                 ctx.fillRect(0, 0, targetWidth, targetHeight);
                                 
                                 // Видео по центру с сохранением пропорций
                                 ctx.drawImage(videoElement, offsetX, offsetY, drawWidth, drawHeight);
                                 
+                                frameCount++;
+                                if (frameCount % 300 === 0) { // Логируем каждые ~10 сек при 30fps
+                                    console.log('[VC-MODE] 🎬 Frame count: ' + frameCount);
+                                }
+                                
                                 requestAnimationFrame(drawFrame);
                             }
-                            drawFrame();
                             
-                            // Создаём поток из canvas
+                            // Создаём поток из canvas ПОСЛЕ первого кадра
                             const canvasStream = canvas.captureStream(${qualitySettings.frameRate.max});
                             finalVideoTrack = canvasStream.getVideoTracks()[0];
                             
+                            // Запускаем цикл отрисовки
+                            drawFrame();
+                            
                             // Сохраняем ссылки для очистки
                             window.__vcCanvasCleanup = () => {
+                                window.isScreenShareActive = false;
                                 videoElement.pause();
                                 videoElement.srcObject = null;
                                 originalVideoTrack.stop();
+                                console.log('[VC-MODE] 🧹 Canvas cleanup completed');
                             };
                             
                             console.log('[VC-MODE] ✅ Canvas processing enabled for black background');
