@@ -91,6 +91,18 @@ export class JitsiWindowUtils {
                 (function() {
                     console.log('[NUKE] === SELECTIVE CLEANUP STARTING ===');
                     window.__interceptorFlag = false;
+                    window.isScreenShareActive = false;
+
+                    // Очистка canvas обработки (если использовался для чёрного фона)
+                    if (window.__vcCanvasCleanup) {
+                        try {
+                            window.__vcCanvasCleanup();
+                            console.log('[NUKE] Canvas cleanup executed');
+                        } catch (e) {
+                            console.log('[NUKE] Canvas cleanup error:', e);
+                        }
+                        window.__vcCanvasCleanup = null;
+                    }
 
                     if (window.jitsiNativeMediaStream) {
                         window.jitsiNativeMediaStream.getTracks().forEach(track => {

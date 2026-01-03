@@ -312,6 +312,30 @@ export class JitsiNativeManager {
                     @keyframes fadeIn {
                         to { opacity: 1; }
                     }
+                    
+                    /* 🎬 Чёрный фон для видео вместо зелёного при нестандартных размерах */
+                    video {
+                        background-color: #000000 !important;
+                        object-fit: contain !important;
+                    }
+                    
+                    /* Контейнеры видео тоже чёрные */
+                    .videocontainer,
+                    .videocontainer__background,
+                    .large-video-background,
+                    .filmstrip__videos,
+                    .filmstrip,
+                    #largeVideoContainer,
+                    #localVideoContainer,
+                    #remoteVideos,
+                    [class*="video"] {
+                        background-color: #000000 !important;
+                    }
+                    
+                    /* Убираем возможный зелёный артефакт */
+                    canvas {
+                        background-color: #000000 !important;
+                    }
                 `);
             });
             const conferenceUrl = JitsiURLBuilder.buildConferenceUrl(server, roomName, options);
@@ -710,7 +734,10 @@ export class JitsiNativeManager {
                             window.jitsiNativeMediaStream = null;
                         }
 
-                        // 1. Захват ВИДЕО через Electron
+                        // 1. Захват ВИДЕО через Electron (оптимизированный)
+                        console.log('[VC-MODE] 🎬 Starting video capture with optimizations...');
+                        const captureStartTime = performance.now();
+                        
                         const videoStream = await navigator.mediaDevices.getUserMedia({
                             audio: false,
                             video: {
@@ -726,6 +753,29 @@ export class JitsiNativeManager {
                                 }
                             }
                         });
+
+                        const captureTime = performance.now() - captureStartTime;
+                        console.log('[VC-MODE] ⚡ Video capture initialized in ' + captureTime.toFixed(0) + 'ms');
+                        
+                        // Получаем информацию о захваченном видео
+                        const videoTrack = videoStream.getVideoTracks()[0];
+                        if (videoTrack) {
+                            const settings = videoTrack.getSettings();
+                            console.log('[VC-MODE] 📐 Video dimensions: ' + settings.width + 'x' + settings.height + ' @ ' + settings.frameRate + 'fps');
+                            
+                            // Применяем оптимизации к видеотреку
+                            try {
+                                await videoTrack.applyConstraints({
+                                    // Приоритет плавности над качеством
+                                    frameRate: { ideal: ${qualitySettings.frameRate.max}, max: ${qualitySettings.frameRate.max} },
+                                    // Уменьшаем задержку
+                                    latency: { ideal: 0, max: 0.1 }
+                                });
+                                console.log('[VC-MODE] ✅ Video optimizations applied');
+                            } catch (e) {
+                                console.log('[VC-MODE] ⚠️ Could not apply all optimizations:', e.message);
+                            }
+                        }
 
                         // 2. Захват АУДИО с виртуального кабеля (CABLE Output)
                         // ВАЖНО: CABLE Input - это куда идёт звук (playback)
@@ -800,9 +850,92 @@ export class JitsiNativeManager {
                             throw new Error('Failed to capture audio from Virtual Cable: ' + errorMessage);
                         }
 
-                        // 3. Объединение
+                        // 3. Создание финального потока с чёрным фоном
+                        console.log('[VC-MODE] 🎨 Creating final stream with black background...');
+                        
+                        const originalVideoTrack = videoStream.getVideoTracks()[0];
+                        const videoSettings = originalVideoTrack.getSettings();
+                        const sourceWidth = videoSettings.width || 1920;
+                        const sourceHeight = videoSettings.height || 1080;
+                        
+                        // Определяем нужна ли обработка через canvas (для нестандартных размеров)
+                        const aspectRatio = sourceWidth / sourceHeight;
+                        const isNonStandardAspect = aspectRatio < 1.0 || aspectRatio > 2.5; // Вертикальное или сверхширокое
+                        
+                        let finalVideoTrack = originalVideoTrack;
+                        
+                        if (isNonStandardAspect) {
+                            console.log('[VC-MODE] 📐 Non-standard aspect ratio detected: ' + aspectRatio.toFixed(2) + ', applying black background');
+                            
+                            // Создаём canvas для обработки с чёрным фоном
+                            const canvas = document.createElement('canvas');
+                            const targetWidth = 1920;
+                            const targetHeight = 1080;
+                            canvas.width = targetWidth;
+                            canvas.height = targetHeight;
+                            const ctx = canvas.getContext('2d');
+                            
+                            // Создаём video элемент для отрисовки
+                            const videoElement = document.createElement('video');
+                            videoElement.srcObject = videoStream;
+                            videoElement.muted = true;
+                            videoElement.autoplay = true;
+                            videoElement.playsInline = true;
+                            
+                            await new Promise(resolve => {
+                                videoElement.onloadedmetadata = resolve;
+                                setTimeout(resolve, 1000); // Fallback
+                            });
+                            await videoElement.play();
+                            
+                            // Рассчитываем размеры с сохранением пропорций
+                            let drawWidth, drawHeight, offsetX, offsetY;
+                            if (sourceWidth / sourceHeight > targetWidth / targetHeight) {
+                                drawWidth = targetWidth;
+                                drawHeight = targetWidth / (sourceWidth / sourceHeight);
+                                offsetX = 0;
+                                offsetY = (targetHeight - drawHeight) / 2;
+                            } else {
+                                drawHeight = targetHeight;
+                                drawWidth = targetHeight * (sourceWidth / sourceHeight);
+                                offsetX = (targetWidth - drawWidth) / 2;
+                                offsetY = 0;
+                            }
+                            
+                            // Функция отрисовки кадра
+                            function drawFrame() {
+                                if (!window.isScreenShareActive) return;
+                                
+                                // Чёрный фон
+                                ctx.fillStyle = '#000000';
+                                ctx.fillRect(0, 0, targetWidth, targetHeight);
+                                
+                                // Видео по центру с сохранением пропорций
+                                ctx.drawImage(videoElement, offsetX, offsetY, drawWidth, drawHeight);
+                                
+                                requestAnimationFrame(drawFrame);
+                            }
+                            drawFrame();
+                            
+                            // Создаём поток из canvas
+                            const canvasStream = canvas.captureStream(${qualitySettings.frameRate.max});
+                            finalVideoTrack = canvasStream.getVideoTracks()[0];
+                            
+                            // Сохраняем ссылки для очистки
+                            window.__vcCanvasCleanup = () => {
+                                videoElement.pause();
+                                videoElement.srcObject = null;
+                                originalVideoTrack.stop();
+                            };
+                            
+                            console.log('[VC-MODE] ✅ Canvas processing enabled for black background');
+                        } else {
+                            console.log('[VC-MODE] ✅ Standard aspect ratio, using direct stream');
+                        }
+                        
+                        // 4. Объединение финального потока
                         const hybridStream = new MediaStream();
-                        hybridStream.addTrack(videoStream.getVideoTracks()[0]);
+                        hybridStream.addTrack(finalVideoTrack);
                         hybridStream.addTrack(audioStream.getAudioTracks()[0]);
 
                         window.jitsiNativeMediaStream = hybridStream;
@@ -811,7 +944,9 @@ export class JitsiNativeManager {
                         window.isHybridMode = true;
                         window.isVirtualCableMode = true;
 
-                        console.log('[VC-MODE] ✅ Hybrid stream created via Virtual Cable');
+                        const totalTime = performance.now() - captureStartTime;
+                        console.log('[VC-MODE] ✅ Hybrid stream created in ' + totalTime.toFixed(0) + 'ms');
+                        console.log('[VC-MODE] 📊 Final stream: ' + hybridStream.getVideoTracks().length + ' video, ' + hybridStream.getAudioTracks().length + ' audio');
                         return { success: true, streamId: hybridStream.id };
                     } catch (error) {
                         console.error('[VC-MODE] Error:', error);
