@@ -317,9 +317,11 @@ export class JitsiNativeManager {
                     video {
                         background-color: #000000 !important;
                         object-fit: contain !important;
+                        /* Дополнительно: box-shadow для скрытия артефактов по краям */
+                        box-shadow: inset 0 0 0 1px #000000;
                     }
                     
-                    /* Контейнеры видео тоже чёрные */
+                    /* Контейнеры видео тоже чёрные - АГРЕССИВНЫЙ СЕЛЕКТОР */
                     .videocontainer,
                     .videocontainer__background,
                     .large-video-background,
@@ -328,13 +330,36 @@ export class JitsiNativeManager {
                     #largeVideoContainer,
                     #localVideoContainer,
                     #remoteVideos,
-                    [class*="video"] {
+                    #videospace,
+                    #localVideoWrapper,
+                    #localVideoTileViewContainer,
+                    .video-thumbnail,
+                    .avatar-container,
+                    .participant-avatar,
+                    [class*="video"],
+                    [class*="Video"],
+                    [id*="video"],
+                    [id*="Video"],
+                    div[style*="green"],
+                    div[style*="rgb(0, 128, 0)"],
+                    div[style*="rgb(0, 255, 0)"] {
                         background-color: #000000 !important;
+                        background: #000000 !important;
                     }
                     
-                    /* Убираем возможный зелёный артефакт */
+                    /* Убираем возможный зелёный артефакт с canvas */
                     canvas {
                         background-color: #000000 !important;
+                        background: #000000 !important;
+                    }
+                    
+                    /* Убираем зелёный с любого элемента с явным зелёным цветом */
+                    *[style*="background-color: green"],
+                    *[style*="background: green"],
+                    *[style*="#00ff00"],
+                    *[style*="#008000"] {
+                        background-color: #000000 !important;
+                        background: #000000 !important;
                     }
                 `);
             });
@@ -342,6 +367,51 @@ export class JitsiNativeManager {
             log.info(`Loading conference URL: ${conferenceUrl}`);
             this.state.window.webContents.on('did-finish-load', async () => {
                 log.info("[JITSI-NATIVE-MANAGER] Page loaded, injecting handlers...");
+                
+                // 🎨 Инъекция скрипта для борьбы с зелёным фоном
+                await this.state.window?.webContents.executeJavaScript(`
+                    (function() {
+                        console.log('[GREEN-FIX] Starting green background fix...');
+                        
+                        // Функция для замены зелёного на чёрный
+                        function fixGreenBackgrounds() {
+                            const allElements = document.querySelectorAll('*');
+                            let fixedCount = 0;
+                            
+                            allElements.forEach(el => {
+                                const style = window.getComputedStyle(el);
+                                const bgColor = style.backgroundColor;
+                                
+                                // Проверяем на зелёный цвет (rgb(0, 128, 0), rgb(0, 255, 0), etc.)
+                                if (bgColor && (
+                                    bgColor.includes('rgb(0, 128, 0)') ||
+                                    bgColor.includes('rgb(0, 255, 0)') ||
+                                    bgColor.includes('rgb(0, 200') ||
+                                    bgColor.includes('rgb(0, 150')
+                                )) {
+                                    el.style.backgroundColor = '#000000';
+                                    fixedCount++;
+                                }
+                            });
+                            
+                            if (fixedCount > 0) {
+                                console.log('[GREEN-FIX] Fixed ' + fixedCount + ' green elements');
+                            }
+                        }
+                        
+                        // Запускаем сразу и потом периодически
+                        fixGreenBackgrounds();
+                        setInterval(fixGreenBackgrounds, 2000);
+                        
+                        // Также следим за изменениями DOM
+                        const observer = new MutationObserver(() => {
+                            fixGreenBackgrounds();
+                        });
+                        observer.observe(document.body, { childList: true, subtree: true });
+                        
+                        console.log('[GREEN-FIX] Green fix observer installed');
+                    })();
+                `);
                 if (this.state.window) {
                     await this.uiManager.waitForJitsiReady(this.state.window);
                     await this.uiManager.hideLoadingScreen(this.state.window);
@@ -957,17 +1027,34 @@ export class JitsiNativeManager {
                             canvas.width = targetWidth;
                             canvas.height = targetHeight;
                             
-                            // Используем willReadFrequently для оптимизации
+                            // Добавляем canvas в DOM (скрытый) - это помогает с инициализацией
+                            canvas.style.cssText = 'position:fixed;top:-9999px;left:-9999px;pointer-events:none;';
+                            document.body.appendChild(canvas);
+                            
+                            // Получаем контекст с настройками для низкой задержки
                             const ctx = canvas.getContext('2d', { 
-                                alpha: false,           // Без альфа-канала - быстрее
+                                alpha: false,           // Без альфа-канала
                                 willReadFrequently: false,
-                                desynchronized: true    // Отключаем синхронизацию для низкой задержки
+                                desynchronized: true    
                             });
                             
-                            // ⚠️ ВАЖНО: Сразу заполняем canvas чёрным, чтобы не было зелёного фона!
+                            // ⚠️ СПОСОБ 1: fillRect
                             ctx.fillStyle = '#000000';
                             ctx.fillRect(0, 0, targetWidth, targetHeight);
-                            console.log('[VC-MODE] 🖤 Canvas initialized with black background');
+                            
+                            // ⚠️ СПОСОБ 2: Явно заполняем ВСЕ пиксели через ImageData (гарантия чёрного)
+                            const imageData = ctx.createImageData(targetWidth, targetHeight);
+                            const data = imageData.data;
+                            // Каждый пиксель: R=0, G=0, B=0, A=255 (чёрный непрозрачный)
+                            for (let i = 0; i < data.length; i += 4) {
+                                data[i] = 0;     // R
+                                data[i + 1] = 0; // G
+                                data[i + 2] = 0; // B
+                                data[i + 3] = 255; // A (полностью непрозрачный!)
+                            }
+                            ctx.putImageData(imageData, 0, 0);
+                            
+                            console.log('[VC-MODE] 🖤 Canvas initialized with black background (ImageData)');
                             
                             // Создаём video элемент для отрисовки
                             const videoElement = document.createElement('video');
@@ -1011,12 +1098,22 @@ export class JitsiNativeManager {
                                     return;
                                 }
                                 
-                                // Чёрный фон - ПОЛНОСТЬЮ заполняем
+                                // Сбрасываем трансформации и композитный режим
+                                ctx.setTransform(1, 0, 0, 1, 0, 0);
+                                ctx.globalCompositeOperation = 'source-over';
+                                
+                                // Чёрный фон - ПОЛНОСТЬЮ заполняем (метод 1)
                                 ctx.fillStyle = '#000000';
                                 ctx.fillRect(0, 0, targetWidth, targetHeight);
                                 
+                                // Дополнительно: clearRect + fillRect для гарантии (метод 2)
+                                // ctx.clearRect(0, 0, targetWidth, targetHeight);
+                                // ctx.fillRect(0, 0, targetWidth, targetHeight);
+                                
                                 // Видео по центру с сохранением пропорций
-                                ctx.drawImage(videoElement, offsetX, offsetY, drawWidth, drawHeight);
+                                if (videoElement.readyState >= 2) { // HAVE_CURRENT_DATA
+                                    ctx.drawImage(videoElement, offsetX, offsetY, drawWidth, drawHeight);
+                                }
                                 
                                 frameCount++;
                                 if (frameCount % 300 === 0) { // Логируем каждые ~10 сек при 30fps
@@ -1039,6 +1136,10 @@ export class JitsiNativeManager {
                                 videoElement.pause();
                                 videoElement.srcObject = null;
                                 originalVideoTrack.stop();
+                                // Удаляем canvas из DOM
+                                if (canvas.parentNode) {
+                                    canvas.parentNode.removeChild(canvas);
+                                }
                                 console.log('[VC-MODE] 🧹 Canvas cleanup completed');
                             };
                             
