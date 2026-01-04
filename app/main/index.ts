@@ -124,6 +124,7 @@ let mainWindowState: windowStateKeeper.State;
 let mainWindow: BrowserWindow;
 let badgeCount: number;
 let isQuitting = false;
+let jitsiManager: JitsiNativeManager | null = null; // 🆕 Глобальная ссылка для восстановления аудио
 
 // Переменные для управления горячей клавишей микрофона
 let currentHotkey: string | null = null;
@@ -405,7 +406,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
   await app.whenReady();
 
   const nativeCaptureManager = new NativeCaptureManager();
-  const jitsiManager = new JitsiNativeManager(  // Изменили тип
+  jitsiManager = new JitsiNativeManager(  // Присваиваем глобальной переменной
     nativeCaptureManager,
     bundlePath,
     iconPath(),
@@ -436,7 +437,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
                   if (hasVC) {
                       log.info('[Virtual Cable] ✅ Device detected, auto-enabling mode');
                       useVirtualCableMode = true;
-                      jitsiManager.enableVirtualCableMode(true);
+                      jitsiManager?.enableVirtualCableMode(true);
                   } else {
                       log.info('[Virtual Cable] No virtual audio device found');
                   }
@@ -675,6 +676,11 @@ async function createMainWindow(): Promise<BrowserWindow> {
   ipcMain.handle("jitsi-connect-with-zulip-config", async (event, options) => {
       log.info("🎯[Jitsi] Connecting with Zulip config...");
       log.info(`🎯[Jitsi] Options received: ${JSON.stringify(options)}`);
+
+      if (!jitsiManager) {
+          log.error("🎯[Jitsi] JitsiManager not initialized!");
+          return { success: false, error: "JitsiManager not initialized" };
+      }
 
       try {
           // Код остается тем же - jitsiManager теперь JitsiNativeManager
@@ -1455,12 +1461,39 @@ async function createMainWindow(): Promise<BrowserWindow> {
 })();
 
 
-app.on("before-quit", () => {
+app.on("before-quit", async (event) => {
+  // 🆕 Восстанавливаем аудио перед выходом из приложения
+  if (jitsiManager) {
+    try {
+      log.info("[APP] Restoring audio before quit...");
+      await jitsiManager.restoreRoutedAudio();
+      log.info("[APP] Audio restored successfully");
+    } catch (error: any) {
+      log.error(`[APP] Failed to restore audio on quit: ${error.message}`);
+    }
+  }
+  
   isQuitting = true;
   // Очищаем горячую клавишу при выходе
   if (currentHotkey) {
     keyboard.stopListener();
     log.info(`Main: Горячая клавиша ${currentHotkey} удалена при выходе`);
+  }
+});
+
+// 🆕 Восстанавливаем аудио при закрытии всех окон (для Windows/Linux)
+app.on("window-all-closed", async () => {
+  if (jitsiManager) {
+    try {
+      log.info("[APP] Restoring audio on all windows closed...");
+      await jitsiManager.restoreRoutedAudio();
+    } catch (error: any) {
+      log.error(`[APP] Failed to restore audio: ${error.message}`);
+    }
+  }
+  
+  if (process.platform !== "darwin") {
+    app.quit();
   }
 });
 

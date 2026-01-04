@@ -169,6 +169,10 @@ export class JitsiNativeManager {
         });
         ipcMain.handle("jitsi:conference-left", async () => {
             log.info("[JITSI-NATIVE-MANAGER] Conference left event received");
+            
+            // 🆕 Восстанавливаем аудио при выходе из конференции
+            await this.restoreRoutedAudio();
+            
             if (this.state.window && !this.state.window.isDestroyed()) {
                 await this.state.window.webContents.executeJavaScript(`
                     (function() {
@@ -192,6 +196,9 @@ export class JitsiNativeManager {
         ipcMain.handle("jitsi:stop-native-capture", async () => {
             log.info("[JITSI-NATIVE-MANAGER] Stop native capture requested");
             try {
+                // 🆕 Восстанавливаем аудио при остановке демонстрации
+                await this.restoreRoutedAudio();
+                
                 if(this.state.window){
                     await JitsiWindowUtils.nukeClearAllStreams(this.state.window);
                     if (this.nativeCapture && this.nativeCapture.isCapturing) {
@@ -227,6 +234,10 @@ export class JitsiNativeManager {
         });
         ipcMain.handle("jitsi:screen-share-stopped", async () => {
             log.info("[JITSI-NATIVE-MANAGER] Screen share stopped event received");
+            
+            // 🆕 Восстанавливаем аудио при остановке screen share
+            await this.restoreRoutedAudio();
+            
             this.state.isStreamActive = false;
             this.state.streamId = null;
             if (this.nativeCapture && this.nativeCapture.isCapturing) {
@@ -243,6 +254,12 @@ export class JitsiNativeManager {
                 `);
             }
             return { success: true };
+        });
+
+        // 🆕 IPC обработчик для ручного восстановления аудио
+        ipcMain.handle("jitsi:restore-all-audio", async () => {
+            log.info("[JITSI-NATIVE-MANAGER] Manual audio restore requested");
+            return await this.restoreRoutedAudio();
         });
     }
 
@@ -1811,6 +1828,37 @@ export class JitsiNativeManager {
         } catch (error: any) {
             log.error(`[VC-MODE] Error restoring ${processName} audio:`, error);
             return { success: false, error: error.message };
+        }
+    }
+
+    // 🆕 Публичный метод для восстановления всех перенаправленных аудио
+    public async restoreRoutedAudio(): Promise<{ success: boolean; error?: string }> {
+        if (!this.routedProcessName) {
+            log.info("[VC-MODE] No routed process to restore");
+            return { success: true };
+        }
+        
+        if (!this.useVirtualCableMode) {
+            log.info("[VC-MODE] Virtual Cable mode is disabled, clearing routed process");
+            this.routedProcessName = null;
+            return { success: true };
+        }
+        
+        log.info(`[VC-MODE] 🔄 Restoring audio for: ${this.routedProcessName}`);
+        
+        try {
+            const success = await this.audioSessionService.restoreDefaultDevice(this.routedProcessName);
+            if (success) {
+                log.info(`[VC-MODE] ✅ Audio restored to default device`);
+            } else {
+                log.warn(`[VC-MODE] ⚠️ Failed to restore audio for ${this.routedProcessName}`);
+            }
+            return { success };
+        } catch (error: any) {
+            log.error(`[VC-MODE] ❌ Failed to restore audio: ${error.message}`);
+            return { success: false, error: error.message };
+        } finally {
+            this.routedProcessName = null;
         }
     }
 
