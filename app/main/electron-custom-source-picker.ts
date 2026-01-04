@@ -17,6 +17,146 @@ export interface SourcePickerOptions {
  */
 export function getSourcePickerCode(): string {
     return `
+        // 🆕 Закрыть диалог и вызвать callback
+        function closeAndCallback(result, overlay, dialog, callback) {
+            overlay.style.background = 'rgba(0, 0, 0, 0)';
+            dialog.style.transform = 'scale(0.9)';
+            dialog.style.opacity = '0';
+            setTimeout(() => {
+                overlay.remove();
+                callback(result);
+            }, 200);
+        }
+        
+        // 🆕 ШАГ 2: Показать выбор аудио-сессии
+        function showAudioSessionPicker(audioSessions, source, overlay, dialog, callback) {
+            // Очищаем текущий dialog
+            dialog.innerHTML = '';
+            
+            const fragment = document.createDocumentFragment();
+            
+            const header = document.createElement('h2');
+            header.style.cssText = 'margin-top: 0; color: #333; font-size: 24px;';
+            header.textContent = '🎵 Выберите источник звука';
+            fragment.appendChild(header);
+            
+            const subtitle = document.createElement('p');
+            subtitle.style.cssText = 'color: #666; margin-bottom: 20px;';
+            subtitle.textContent = 'Выберите приложение, звук которого нужно изолировать для трансляции:';
+            fragment.appendChild(subtitle);
+            
+            const list = document.createElement('div');
+            list.style.cssText = 'max-height: 300px; overflow-y: auto; margin: 16px 0;';
+            
+            if (audioSessions.length === 0) {
+                const noSessions = document.createElement('div');
+                noSessions.style.cssText = 'text-align: center; color: #999; padding: 40px;';
+                noSessions.innerHTML = '⚠️ Нет активных аудио-сессий.<br><small>Запустите приложение и воспроизведите звук.</small>';
+                list.appendChild(noSessions);
+            } else {
+                audioSessions.forEach(session => {
+                    const item = document.createElement('div');
+                    item.style.cssText = \`
+                        display: flex;
+                        align-items: center;
+                        padding: 12px 16px;
+                        margin: 8px 0;
+                        background: #f5f5f5;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        border: 2px solid transparent;
+                        transition: border-color 0.15s, background 0.15s;
+                    \`;
+                    
+                    const info = document.createElement('div');
+                    info.style.cssText = 'flex: 1;';
+                    
+                    const name = document.createElement('div');
+                    name.style.cssText = 'font-weight: 500; color: #333;';
+                    name.textContent = session.displayName || session.processName;
+                    
+                    const details = document.createElement('div');
+                    details.style.cssText = 'font-size: 12px; color: #888; margin-top: 4px;';
+                    details.textContent = session.processName + ' • Громкость: ' + session.volume + '%' + (session.muted ? ' (🔇 muted)' : '');
+                    
+                    info.appendChild(name);
+                    info.appendChild(details);
+                    item.appendChild(info);
+                    
+                    item.onmouseenter = () => {
+                        item.style.borderColor = '#2196F3';
+                        item.style.background = '#e3f2fd';
+                    };
+                    item.onmouseleave = () => {
+                        item.style.borderColor = 'transparent';
+                        item.style.background = '#f5f5f5';
+                    };
+                    
+                    item.onclick = () => {
+                        closeAndCallback({
+                            sourceId: source.id,
+                            sourceName: source.name,
+                            useVirtualCable: true,
+                            audioSession: {
+                                processPath: session.processPath,
+                                processName: session.processName,
+                                displayName: session.displayName
+                            }
+                        }, overlay, dialog, callback);
+                    };
+                    
+                    list.appendChild(item);
+                });
+            }
+            
+            fragment.appendChild(list);
+            
+            // Кнопки
+            const buttons = document.createElement('div');
+            buttons.style.cssText = 'display: flex; gap: 12px; justify-content: center; margin-top: 20px;';
+            
+            const skipBtn = document.createElement('button');
+            skipBtn.textContent = 'Пропустить (без изоляции)';
+            skipBtn.style.cssText = \`
+                background: #9e9e9e;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 14px;
+            \`;
+            skipBtn.onclick = () => {
+                closeAndCallback({
+                    sourceId: source.id,
+                    sourceName: source.name,
+                    useVirtualCable: true,
+                    audioSession: null
+                }, overlay, dialog, callback);
+            };
+            
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = 'Отмена';
+            cancelBtn.style.cssText = \`
+                background: #f44336;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 14px;
+            \`;
+            cancelBtn.onclick = () => {
+                closeAndCallback(null, overlay, dialog, callback);
+            };
+            
+            buttons.appendChild(skipBtn);
+            buttons.appendChild(cancelBtn);
+            fragment.appendChild(buttons);
+            
+            dialog.appendChild(fragment);
+        }
+        
         function showSourcePicker(sources, callback) {
             requestAnimationFrame(() => {
                 const existing = document.getElementById('source-picker-overlay');
@@ -143,16 +283,23 @@ export function getSourcePickerCode(): string {
                         item.style.transform = 'scale(1)';
                     };
                     
-                    item.onclick = () => {
+                    item.onclick = async () => {
                         const useVC = document.getElementById('use-virtual-cable').checked;
-                        overlay.style.background = 'rgba(0, 0, 0, 0)';
-                        dialog.style.transform = 'scale(0.9)';
-                        dialog.style.opacity = '0';
-                        setTimeout(() => {
-                            overlay.remove();
-                            // Передаём ОБЪЕКТ: sourceId + sourceName + флаг режима
-                            callback({ sourceId: source.id, sourceName: source.name, useVirtualCable: useVC });
-                        }, 200);
+                        
+                        if (useVC) {
+                            // 🆕 ШАГ 2: Показываем выбор аудио-сессии
+                            try {
+                                const audioSessions = await window.ipcRenderer.invoke('jitsi:get-audio-sessions');
+                                showAudioSessionPicker(audioSessions, source, overlay, dialog, callback);
+                            } catch (e) {
+                                console.error('[SourcePicker] Failed to get audio sessions:', e);
+                                // Продолжаем без выбора аудио
+                                closeAndCallback({ sourceId: source.id, sourceName: source.name, useVirtualCable: true, audioSession: null }, overlay, dialog, callback);
+                            }
+                        } else {
+                            // Без VB-Cable — сразу закрываем
+                            closeAndCallback({ sourceId: source.id, sourceName: source.name, useVirtualCable: false, audioSession: null }, overlay, dialog, callback);
+                        }
                     };
                     
                     grid.appendChild(item);

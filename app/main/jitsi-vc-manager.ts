@@ -102,24 +102,46 @@ export class JitsiNativeManager {
                 useVirtualCable: this.useVirtualCableMode
             };
         });
-        ipcMain.handle("jitsi:save-selected-source", async (event, sourceId: string, sourceName?: string) => {
+        // Обработчик сохранения выбранного источника с явным выбором аудио-сессии
+        ipcMain.handle("jitsi:save-selected-source", async (event, sourceId: string, sourceName?: string, audioSession?: { processPath: string; processName: string; displayName: string }) => {
             this.state.lastSelectedSourceId = sourceId;
             this.state.lastSelectedSourceName = sourceName || null;
             log.info(`[VC-MODE] Saved selected source: ${sourceId} (${sourceName || 'unknown'})`);
             
-            // Если Virtual Cable включён, попробуем найти и маршрутизировать аудио
-            if (this.useVirtualCableMode && sourceName) {
-                await this.tryAutoRouteAudio(sourceName);
+            // Если Virtual Cable включён И пользователь выбрал аудио-сессию — перенаправляем
+            if (this.useVirtualCableMode && audioSession && audioSession.processPath) {
+                log.info(`[VC-MODE] 🎵 User selected audio session: "${audioSession.displayName}" (${audioSession.processPath})`);
+                const result = await this.routeAppAudioToCable(audioSession.processPath);
+                if (result.success) {
+                    log.info(`[VC-MODE] ✅ Routed "${audioSession.displayName}" to VB-Cable`);
+                } else {
+                    log.warn(`[VC-MODE] ⚠️ Failed to route audio: ${result.error}`);
+                }
+            } else if (this.useVirtualCableMode) {
+                log.info(`[VC-MODE] ℹ️ No audio session selected - audio will not be isolated`);
             }
             
             return { success: true };
         });
         // 🆕 Обработчики для перенаправления звука приложения
-        ipcMain.handle("jitsi:route-app-audio-to-cable", async (event, processName: string) => {
-            return await this.routeAppAudioToCable(processName);
+        ipcMain.handle("jitsi:route-app-audio-to-cable", async (event, processPath: string) => {
+            return await this.routeAppAudioToCable(processPath);
         });
-        ipcMain.handle("jitsi:restore-app-audio", async (event, processName: string) => {
-            return await this.restoreAppAudio(processName);
+        ipcMain.handle("jitsi:restore-app-audio", async (event, processPath: string) => {
+            return await this.restoreAppAudio(processPath);
+        });
+        
+        // 🆕 Получить список активных аудио-сессий для выбора пользователем
+        ipcMain.handle("jitsi:get-audio-sessions", async () => {
+            try {
+                const sessions = await this.audioSessionService.getAudioSessions();
+                log.info(`[VC-MODE] 🎵 Got ${sessions.length} audio sessions for picker`);
+                // Фильтруем Electron
+                return sessions.filter(s => !s.processName.toLowerCase().includes('electron'));
+            } catch (error: any) {
+                log.error(`[VC-MODE] Error getting audio sessions: ${error.message}`);
+                return [];
+            }
         });
         ipcMain.handle("jitsi:get-config", async () => {
             return this.getConfig();
@@ -1683,147 +1705,7 @@ export class JitsiNativeManager {
         }
     }
     
-    // 🆕 Автоматический поиск и маршрутизация аудио по имени источника
-    private async tryAutoRouteAudio(sourceName: string): Promise<void> {
-        try {
-            log.info(`[VC-MODE] 🔍 Trying to auto-route audio for: "${sourceName}"`);
-            
-            // Проверяем готовность SVV
-            const isReady = await this.audioSessionService.isReady();
-            if (!isReady) {
-                log.warn("[VC-MODE] ⚠️ SoundVolumeView not ready - cannot route audio");
-                log.warn("[VC-MODE] Audio will be captured from ALL apps going to VB-Cable");
-                return;
-            }
-            
-            // Получаем список аудио сессий
-            const sessions = await this.audioSessionService.getAudioSessions();
-            log.info(`[VC-MODE] Found ${sessions.length} audio sessions:`);
-            sessions.forEach(s => {
-                log.info(`[VC-MODE]   - ${s.processName} (${s.displayName}) - ${s.volume}%`);
-            });
-            
-            if (sessions.length === 0) {
-                log.warn("[VC-MODE] ⚠️ No audio sessions found - start an app with sound first!");
-                return;
-            }
-            
-            // Пытаемся найти совпадение по имени
-            const sourceNameLower = sourceName.toLowerCase();
-            
-            // 🆕 Маппинг известных Windows UWP приложений (название окна → процесс)
-            const uwpAppMapping: Record<string, string[]> = {
-                'медиаплеер': ['microsoft.media.player'],
-                'media player': ['microsoft.media.player'],
-                'фотографии': ['microsoft.photos'],
-                'photos': ['microsoft.photos'],
-                'кино и тв': ['microsoft.zunevideo', 'video.ui'],
-                'movies & tv': ['microsoft.zunevideo', 'video.ui'],
-                'музыка groove': ['microsoft.zunemusic'],
-                'groove music': ['microsoft.zunemusic'],
-                'калькулятор': ['calculator'],
-                'calculator': ['calculator'],
-                'spotify': ['spotify'],
-                'vlc': ['vlc'],
-                'itunes': ['itunes'],
-            };
-            
-            // Проверяем UWP маппинг
-            for (const [windowName, processPatterns] of Object.entries(uwpAppMapping)) {
-                if (sourceNameLower.includes(windowName)) {
-                    const uwpMatch = sessions.find(s => {
-                        const processLower = s.processName.toLowerCase().replace('.exe', '');
-                        return processPatterns.some(p => processLower.includes(p));
-                    });
-                    if (uwpMatch) {
-                        // ⚠️ ВАЖНО: Используем processPath для корректной работы с SVV!
-                        log.info(`[VC-MODE] 🎯 UWP mapping: "${sourceName}" → "${uwpMatch.processName}" (path: "${uwpMatch.processPath}")`);
-                        const result = await this.routeAppAudioToCable(uwpMatch.processPath);
-                        if (result.success) {
-                            log.info(`[VC-MODE] ✅ Auto-routed "${uwpMatch.processPath}" to VB-Cable`);
-                        }
-                        return;
-                    }
-                }
-            }
-            
-            // Известные браузеры - если заголовок окна содержит название сайта, 
-            // а в sessions есть браузер - это скорее всего он
-            const browserProcesses = ['chrome', 'firefox', 'msedge', 'opera', 'brave', 'yandex', 'vivaldi', 'browser'];
-            const gameProcesses = ['cs2', 'dota2', 'valorant', 'steam', 'epicgames', 'discord'];
-            
-            let matchedSession = sessions.find(s => {
-                const processLower = s.processName.toLowerCase().replace('.exe', '');
-                const displayLower = s.displayName.toLowerCase();
-                
-                // Прямое совпадение
-                if (sourceNameLower.includes(processLower) || 
-                    sourceNameLower.includes(displayLower) ||
-                    processLower.includes(sourceNameLower.split(' ')[0]) ||
-                    displayLower.includes(sourceNameLower.split(' ')[0])) {
-                    return true;
-                }
-                
-                // Проверяем паттерн браузера: "Название сайта - Chrome" или "Название сайта — Mozilla Firefox"
-                const browserSuffixes = [' - google chrome', ' - chrome', ' - mozilla firefox', ' - firefox', 
-                                        ' - microsoft edge', ' - edge', ' — opera', ' - brave', ' - yandex'];
-                for (const suffix of browserSuffixes) {
-                    if (sourceNameLower.includes(suffix.replace(' - ', '').replace(' — ', ''))) {
-                        // Источник это браузер, ищем соответствующий процесс
-                        const browserName = suffix.replace(' - ', '').replace(' — ', '').split(' ')[0];
-                        if (processLower.includes(browserName)) {
-                            return true;
-                        }
-                    }
-                }
-                
-                return false;
-            });
-            
-            // Если не нашли прямое совпадение, но есть только одна сессия (кроме electron) - используем её
-            if (!matchedSession) {
-                const nonElectronSessions = sessions.filter(s => 
-                    !s.processName.toLowerCase().includes('electron')
-                );
-                if (nonElectronSessions.length === 1) {
-                    matchedSession = nonElectronSessions[0];
-                    log.info(`[VC-MODE] 💡 Only one non-Electron audio session found, using it: ${matchedSession.processName}`);
-                }
-            }
-            
-            // Если всё ещё не нашли, проверяем известные браузеры/игры
-            if (!matchedSession) {
-                matchedSession = sessions.find(s => {
-                    const processLower = s.processName.toLowerCase().replace('.exe', '');
-                    return browserProcesses.some(b => processLower.includes(b)) ||
-                           gameProcesses.some(g => processLower.includes(g));
-                });
-                if (matchedSession) {
-                    log.info(`[VC-MODE] 💡 Found known app in sessions: ${matchedSession.processName}`);
-                }
-            }
-            
-            if (matchedSession) {
-                // ⚠️ ВАЖНО: Используем processPath для корректной работы с SVV!
-                log.info(`[VC-MODE] ✅ Matched source "${sourceName}" to process "${matchedSession.processName}" (path: "${matchedSession.processPath}")`);
-                const result = await this.routeAppAudioToCable(matchedSession.processPath);
-                if (result.success) {
-                    log.info(`[VC-MODE] ✅ Auto-routed "${matchedSession.processPath}" to VB-Cable`);
-                } else {
-                    log.warn(`[VC-MODE] ⚠️ Failed to auto-route: ${result.error}`);
-                }
-            } else {
-                log.warn(`[VC-MODE] ⚠️ No matching audio session found for "${sourceName}"`);
-                log.info("[VC-MODE] 💡 TIP: Make sure the app you want to share is playing audio!");
-                log.info("[VC-MODE] Available sessions for manual selection:");
-                sessions.forEach(s => {
-                    log.info(`[VC-MODE]   → ${s.processName} (${s.displayName}) path: ${s.processPath}`);
-                });
-            }
-        } catch (error: any) {
-            log.error(`[VC-MODE] ❌ Auto-route error: ${error.message}`);
-        }
-    }
+    // 🗑️ tryAutoRouteAudio удалён — теперь пользователь сам выбирает аудио-сессию в диалоге
     
     // 🆕 Метод для перенаправления звука приложения на VB-Cable
     // Принимает processPath (полный путь) для корректной работы с SVV
