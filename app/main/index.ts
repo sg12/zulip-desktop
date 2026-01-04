@@ -54,6 +54,15 @@ import AdmZip from 'adm-zip';
 
 // const { JitsiMeetElectron } = require('@jitsi/electron-sdk');
 
+// 🎬 Отключаем WinRT захват для совместимости с UWP приложениями (Media Player и др.)
+// Это решает проблему "зелёного экрана" при захвате некоторых окон
+app.commandLine.appendSwitch('disable-features', 'UseWinrtCapturer,HardwareMediaKeyHandling');
+// Альтернативные флаги для проблемных систем:
+// app.commandLine.appendSwitch('use-angle', 'gl');
+// app.commandLine.appendSwitch('disable-gpu-sandbox');
+
+log.info('[CAPTURE] WinRT capturer disabled for UWP app compatibility');
+
 let useVirtualCableMode = false;
 
 let JitsiMeetElectron: any;
@@ -319,7 +328,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
         console.error(`❌ HTML file not found: ${htmlPath}`);
         console.error('Try running: npm run build-only');
     }
-    
+
     await win.loadURL(mainUrl).then(() => {
         console.log('✅ Окно создано!');
         if (ConfigUtil.getConfigItem('startMinimized', false)) {
