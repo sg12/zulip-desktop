@@ -543,14 +543,14 @@ export function getSimplifiedScreenShareInterceptorCode(): string {
                                 return;
                             }
                             
-                            const { sourceId, sourceName, useVirtualCable } = result;
+                            const { sourceId, sourceName, useVirtualCable, audioSession } = result;
                             
                             try {
                                 // 🆕 Передаём режим Virtual Cable в main process
                                 await window.ipcRenderer.invoke('jitsi:set-virtual-cable-mode', useVirtualCable);
                                 
-                                // Сохраняем выбранный источник с именем для маршрутизации аудио
-                                await window.ipcRenderer.invoke('jitsi:save-selected-source', sourceId, sourceName);
+                                // Сохраняем выбранный источник с аудио-сессией для маршрутизации
+                                await window.ipcRenderer.invoke('jitsi:save-selected-source', sourceId, sourceName, audioSession || null);
                                 
                                 // Создаем нативный поток
                                 const streamResult = await window.ipcRenderer.invoke('create-native-stream-for-jitsi');
