@@ -1711,9 +1711,44 @@ export class JitsiNativeManager {
             // Пытаемся найти совпадение по имени
             const sourceNameLower = sourceName.toLowerCase();
             
+            // 🆕 Маппинг известных Windows UWP приложений (название окна → процесс)
+            const uwpAppMapping: Record<string, string[]> = {
+                'медиаплеер': ['microsoft.media.player'],
+                'media player': ['microsoft.media.player'],
+                'фотографии': ['microsoft.photos'],
+                'photos': ['microsoft.photos'],
+                'кино и тв': ['microsoft.zunevideo', 'video.ui'],
+                'movies & tv': ['microsoft.zunevideo', 'video.ui'],
+                'музыка groove': ['microsoft.zunemusic'],
+                'groove music': ['microsoft.zunemusic'],
+                'калькулятор': ['calculator'],
+                'calculator': ['calculator'],
+                'spotify': ['spotify'],
+                'vlc': ['vlc'],
+                'itunes': ['itunes'],
+            };
+            
+            // Проверяем UWP маппинг
+            for (const [windowName, processPatterns] of Object.entries(uwpAppMapping)) {
+                if (sourceNameLower.includes(windowName)) {
+                    const uwpMatch = sessions.find(s => {
+                        const processLower = s.processName.toLowerCase().replace('.exe', '');
+                        return processPatterns.some(p => processLower.includes(p));
+                    });
+                    if (uwpMatch) {
+                        log.info(`[VC-MODE] 🎯 UWP mapping: "${sourceName}" → "${uwpMatch.processName}"`);
+                        const result = await this.routeAppAudioToCable(uwpMatch.processName);
+                        if (result.success) {
+                            log.info(`[VC-MODE] ✅ Auto-routed ${uwpMatch.processName} to VB-Cable`);
+                        }
+                        return;
+                    }
+                }
+            }
+            
             // Известные браузеры - если заголовок окна содержит название сайта, 
             // а в sessions есть браузер - это скорее всего он
-            const browserProcesses = ['chrome', 'firefox', 'msedge', 'opera', 'brave', 'yandex', 'vivaldi'];
+            const browserProcesses = ['chrome', 'firefox', 'msedge', 'opera', 'brave', 'yandex', 'vivaldi', 'browser'];
             const gameProcesses = ['cs2', 'dota2', 'valorant', 'steam', 'epicgames', 'discord'];
             
             let matchedSession = sessions.find(s => {

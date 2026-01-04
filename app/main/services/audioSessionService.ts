@@ -319,20 +319,50 @@ export class AudioSessionService {
      * Вернуть приложение на устройство по умолчанию
      */
     async restoreDefaultDevice(processName: string): Promise<boolean> {
+        log.info(`[AudioSession] 🔄 Restoring ${processName} to default device...`);
+        
         const svvPath = await this.getSVVPath();
         if (!svvPath) {
             throw new Error("SoundVolumeView not found");
         }
 
         try {
-            // Получаем устройство по умолчанию
+            // Используем "DefaultRenderDevice" - специальное имя для устройства по умолчанию в SVV
+            // Или ищем устройство "Динамики" / "Speakers" как fallback
             const devices = await this.getAudioDevices();
-            const defaultDevice = devices.find((d) => d.isDefault) || devices[0];
+            
+            // Находим устройство по умолчанию (не VB-Cable)
+            let defaultDevice = devices.find((d) => {
+                const nameLower = d.name.toLowerCase();
+                // Исключаем виртуальные устройства
+                return !nameLower.includes("cable") && 
+                       !nameLower.includes("virtual") && 
+                       !nameLower.includes("vb-audio") &&
+                       (nameLower.includes("динамики") || 
+                        nameLower.includes("speakers") ||
+                        nameLower.includes("realtek") ||
+                        nameLower.includes("headphone") ||
+                        nameLower.includes("наушники"));
+            });
+            
+            // Fallback: первое не-Cable устройство
+            if (!defaultDevice) {
+                defaultDevice = devices.find((d) => {
+                    const nameLower = d.name.toLowerCase();
+                    return !nameLower.includes("cable") && 
+                           !nameLower.includes("virtual") && 
+                           !nameLower.includes("vb-audio");
+                });
+            }
 
             if (!defaultDevice) {
+                log.error("[AudioSession] ❌ No default device found (all devices are virtual?)");
+                log.info("[AudioSession] Available devices:", devices.map(d => d.name));
                 throw new Error("No default device found");
             }
 
+            log.info(`[AudioSession] 🔊 Restoring to: ${defaultDevice.name}`);
+            
             await execFileAsync(
                 svvPath,
                 ["/SetAppDefault", defaultDevice.name, "all", processName],
@@ -341,10 +371,10 @@ export class AudioSessionService {
                 }
             );
 
-            log.info(`[AudioSession] Restored ${processName} to default device`);
+            log.info(`[AudioSession] ✅ Restored ${processName} to ${defaultDevice.name}`);
             return true;
         } catch (error: any) {
-            log.error(`[AudioSession] Error restoring ${processName}:`, error);
+            log.error(`[AudioSession] ❌ Error restoring ${processName}:`, error.message);
             throw new Error(`Failed to restore audio: ${error.message}`);
         }
     }
