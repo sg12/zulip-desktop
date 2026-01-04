@@ -53,7 +53,7 @@ exports.default = async function(context) {
             fs.renameSync(extraResourcePath, targetPath);
             console.log('✓ native-addon.node moved to app/dist-electron');
         } else {
-            console.error(`✗ Source file not found: ${sourcePath}`);
+            console.log(`⚠️  native-addon.node not found (optional for Virtual Cable mode): ${sourcePath}`);
         }
     }
 };

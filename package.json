@@ -32,7 +32,7 @@
     "post-build-win-node": "node -e \"const fs=require('fs'),path=require('path');const mkdirp=(dir)=>{if(!fs.existsSync(dir))fs.mkdirSync(dir,{recursive:true})};const copyFiles=(src,dest)=>{mkdirp(path.dirname(dest));fs.readdirSync(src).forEach(f=>{if(f.endsWith('.html'))fs.copyFileSync(path.join(src,f),path.join(dest,f))})};copyFiles('app/renderer','dist/win-unpacked/resources/app/app/renderer');try{fs.renameSync('dist/win-unpacked/resources/native-addon.node','dist/win-unpacked/resources/app/dist-electron/native-addon.node')}catch(e){}\"",
     "build-win-complete": "vite build && cp native-addon/win/capture.node dist-electron/native-addon.node && electron-builder --win --x64 --dir && npm run post-build-win-node",
     "build-win-nosign": "npm run build-for-win && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --x64 --dir && npm run post-build-win",
-    "build-win-test": "npm run build-only && npm run copy-svv && electron-builder --win --x64 --dir",
+    "build-win-test": "npm run build-only && npm run copy-svv && electron-builder --win --x64 --dir --config.win.sign=null",
     "copy-svv": "node -e \"const fs=require('fs'),path=require('path');const src=path.join('tools','SoundVolumeView.exe');const dest=path.join('dist-electron','tools','SoundVolumeView.exe');if(fs.existsSync(src)){fs.mkdirSync(path.dirname(dest),{recursive:true});fs.copyFileSync(src,dest);console.log('✓ Copied SoundVolumeView.exe to dist-electron/tools/');}else{console.log('⚠️  SoundVolumeView.exe not found in tools/ - audio routing will not work');}\"",
     "watch-ts": "tsc -w",
     "reinstall": "rimraf node_modules && npm install",
@@ -77,17 +77,8 @@
       "dist-electron/**/*.node",
       "!dist-electron/**/*.map"
     ],
-    "extraFiles": [
-      {
-        "from": "dist-electron/native-addon.node",
-        "to": "app/dist-electron/native-addon.node"
-      }
-    ],
+    "extraFiles": [],
     "extraResources": [
-      {
-        "from": "dist-electron/native-addon.node",
-        "to": "native-addon.node"
-      },
       {
         "from": "bin/WinKeyServer.exe",
         "to": "bin/WinKeyServer.exe"
