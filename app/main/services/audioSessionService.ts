@@ -296,9 +296,11 @@ export class AudioSessionService {
 
     /**
      * Перенаправить звук приложения на устройство
+     * @param processPathOrName - полный путь к процессу (предпочтительно) или имя процесса
+     * @param deviceName - Device Name устройства (например "VB-Audio Virtual Cable")
      */
-    async setAppAudioDevice(processName: string, deviceName: string): Promise<boolean> {
-        log.info(`[AudioSession] 🔀 Routing ${processName} → ${deviceName}`);
+    async setAppAudioDevice(processPathOrName: string, deviceName: string): Promise<boolean> {
+        log.info(`[AudioSession] 🔀 Routing "${processPathOrName}" → "${deviceName}"`);
         
         const svvPath = await this.getSVVPath();
         if (!svvPath) {
@@ -307,28 +309,30 @@ export class AudioSessionService {
         }
 
         try {
-            log.info(`[AudioSession] Executing: ${svvPath} /SetAppDefault "${deviceName}" all "${processName}"`);
+            // SVV принимает полный путь или имя процесса
+            log.info(`[AudioSession] Executing: /SetAppDefault "${deviceName}" all "${processPathOrName}"`);
             await execFileAsync(
                 svvPath,
-                ["/SetAppDefault", deviceName, "all", processName],
+                ["/SetAppDefault", deviceName, "all", processPathOrName],
                 {
                     windowsHide: true,
                 }
             );
 
-            log.info(`[AudioSession] ✅ Successfully routed ${processName} to ${deviceName}`);
+            log.info(`[AudioSession] ✅ Successfully routed "${processPathOrName}" to "${deviceName}"`);
             return true;
         } catch (error: any) {
-            log.error(`[AudioSession] ❌ Error routing ${processName} to ${deviceName}:`, error.message);
+            log.error(`[AudioSession] ❌ Error routing "${processPathOrName}" to "${deviceName}":`, error.message);
             throw new Error(`Failed to route audio: ${error.message}`);
         }
     }
 
     /**
      * Вернуть приложение на устройство по умолчанию
+     * @param processPathOrName - полный путь к процессу (предпочтительно) или имя процесса
      */
-    async restoreDefaultDevice(processName: string): Promise<boolean> {
-        log.info(`[AudioSession] 🔄 Restoring ${processName} to default device...`);
+    async restoreDefaultDevice(processPathOrName: string): Promise<boolean> {
+        log.info(`[AudioSession] 🔄 Restoring "${processPathOrName}" to default device...`);
         
         const svvPath = await this.getSVVPath();
         if (!svvPath) {
@@ -375,19 +379,19 @@ export class AudioSessionService {
 
             log.info(`[AudioSession] 🔊 Restoring to: "${defaultDevice.name}" (DeviceName: "${defaultDevice.deviceName}")`);
             
-            // ⚠️ ВАЖНО: Используем deviceName для SetAppDefault!
+            // ⚠️ ВАЖНО: Используем deviceName для устройства и processPath для приложения!
             await execFileAsync(
                 svvPath,
-                ["/SetAppDefault", defaultDevice.deviceName, "all", processName],
+                ["/SetAppDefault", defaultDevice.deviceName, "all", processPathOrName],
                 {
                     windowsHide: true,
                 }
             );
 
-            log.info(`[AudioSession] ✅ Restored ${processName} to ${defaultDevice.deviceName}`);
+            log.info(`[AudioSession] ✅ Restored "${processPathOrName}" to "${defaultDevice.deviceName}"`);
             return true;
         } catch (error: any) {
-            log.error(`[AudioSession] ❌ Error restoring ${processName}:`, error.message);
+            log.error(`[AudioSession] ❌ Error restoring "${processPathOrName}":`, error.message);
             throw new Error(`Failed to restore audio: ${error.message}`);
         }
     }
