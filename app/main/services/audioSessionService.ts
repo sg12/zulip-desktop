@@ -16,7 +16,8 @@ export interface AudioSession {
 }
 
 export interface AudioDevice {
-    name: string;
+    name: string;        // "Динамики", "CABLE Input" (Display Name)
+    deviceName: string;  // "Realtek(R) Audio", "VB-Audio Virtual Cable" (Device Name for SetAppDefault)
     id: string;
     isDefault: boolean;
 }
@@ -224,6 +225,7 @@ export class AudioSessionService {
 
     /**
      * Получить список аудио устройств
+     * Колонки: Name (Display), Type, Direction, Device Name (для SetAppDefault), Default
      */
     async getAudioDevices(): Promise<AudioDevice[]> {
         const svvPath = await this.getSVVPath();
@@ -234,7 +236,7 @@ export class AudioSessionService {
         try {
             const { stdout } = await execFileAsync(
                 svvPath,
-                ["/scomma", "", "/Columns", "Name,Type,Direction"],
+                ["/scomma", "", "/Columns", "Name,Type,Direction,Device Name,Default"],
                 {
                     windowsHide: true,
                     encoding: "utf-8",
@@ -250,6 +252,7 @@ export class AudioSessionService {
 
     /**
      * Парсинг CSV для устройств
+     * Формат: Name,Type,Direction,Device Name,Default
      */
     private parseDevicesCSV(csv: string): AudioDevice[] {
         const lines = csv.trim().split("\n");
@@ -264,20 +267,26 @@ export class AudioSessionService {
             if (!line.trim()) continue;
 
             const columns = this.parseCSVLine(line);
-            if (columns.length < 3) continue;
+            if (columns.length < 5) continue;
 
             const type = columns[1]?.trim();
             const direction = columns[2]?.trim();
 
-            // Фильтруем только устройства вывода
+            // Фильтруем только устройства вывода (Render)
             if (type === "Device" && direction === "Render") {
-                const name = columns[0]?.trim() || "";
-                if (name) {
+                const name = columns[0]?.trim() || "";           // Display Name: "Динамики", "CABLE Input"
+                const deviceName = columns[3]?.trim() || "";     // Device Name: "Realtek(R) Audio", "VB-Audio Virtual Cable"
+                const defaultInfo = columns[4]?.trim() || "";    // Default: "Render" или пусто
+                
+                if (name && deviceName) {
+                    const isDefault = defaultInfo.toLowerCase().includes("render");
                     devices.push({
                         name,
-                        id: name, // SoundVolumeView использует имя как ID
-                        isDefault: name.toLowerCase().includes("default"),
+                        deviceName,  // ← Это используется для SetAppDefault!
+                        id: deviceName,
+                        isDefault,
                     });
+                    log.info(`[AudioSession] 📢 Device: "${name}" → DeviceName: "${deviceName}" (default: ${isDefault})`);
                 }
             }
         }
@@ -327,51 +336,55 @@ export class AudioSessionService {
         }
 
         try {
-            // Используем "DefaultRenderDevice" - специальное имя для устройства по умолчанию в SVV
-            // Или ищем устройство "Динамики" / "Speakers" как fallback
             const devices = await this.getAudioDevices();
             
-            // Находим устройство по умолчанию (не VB-Cable)
-            let defaultDevice = devices.find((d) => {
-                const nameLower = d.name.toLowerCase();
-                // Исключаем виртуальные устройства
-                return !nameLower.includes("cable") && 
-                       !nameLower.includes("virtual") && 
-                       !nameLower.includes("vb-audio") &&
-                       (nameLower.includes("динамики") || 
-                        nameLower.includes("speakers") ||
-                        nameLower.includes("realtek") ||
-                        nameLower.includes("headphone") ||
-                        nameLower.includes("наушники"));
-            });
+            // 1. Сначала ищем устройство, помеченное как default
+            let defaultDevice = devices.find((d) => d.isDefault);
             
-            // Fallback: первое не-Cable устройство
+            // 2. Если нет default, ищем устройство по имени (не VB-Cable)
             if (!defaultDevice) {
                 defaultDevice = devices.find((d) => {
                     const nameLower = d.name.toLowerCase();
-                    return !nameLower.includes("cable") && 
-                           !nameLower.includes("virtual") && 
-                           !nameLower.includes("vb-audio");
+                    const deviceNameLower = d.deviceName.toLowerCase();
+                    // Исключаем виртуальные устройства
+                    return !deviceNameLower.includes("vb-audio") && 
+                           !deviceNameLower.includes("virtual") && 
+                           !nameLower.includes("cable") &&
+                           (nameLower.includes("динамики") || 
+                            nameLower.includes("speakers") ||
+                            deviceNameLower.includes("realtek") ||
+                            nameLower.includes("headphone") ||
+                            nameLower.includes("наушники"));
+                });
+            }
+            
+            // 3. Fallback: первое не-Cable устройство
+            if (!defaultDevice) {
+                defaultDevice = devices.find((d) => {
+                    const deviceNameLower = d.deviceName.toLowerCase();
+                    return !deviceNameLower.includes("vb-audio") && 
+                           !deviceNameLower.includes("virtual");
                 });
             }
 
             if (!defaultDevice) {
                 log.error("[AudioSession] ❌ No default device found (all devices are virtual?)");
-                log.info("[AudioSession] Available devices:", devices.map(d => d.name));
+                log.info("[AudioSession] Available devices:", devices.map(d => `${d.name} → ${d.deviceName}`));
                 throw new Error("No default device found");
             }
 
-            log.info(`[AudioSession] 🔊 Restoring to: ${defaultDevice.name}`);
+            log.info(`[AudioSession] 🔊 Restoring to: "${defaultDevice.name}" (DeviceName: "${defaultDevice.deviceName}")`);
             
+            // ⚠️ ВАЖНО: Используем deviceName для SetAppDefault!
             await execFileAsync(
                 svvPath,
-                ["/SetAppDefault", defaultDevice.name, "all", processName],
+                ["/SetAppDefault", defaultDevice.deviceName, "all", processName],
                 {
                     windowsHide: true,
                 }
             );
 
-            log.info(`[AudioSession] ✅ Restored ${processName} to ${defaultDevice.name}`);
+            log.info(`[AudioSession] ✅ Restored ${processName} to ${defaultDevice.deviceName}`);
             return true;
         } catch (error: any) {
             log.error(`[AudioSession] ❌ Error restoring ${processName}:`, error.message);
@@ -387,9 +400,9 @@ export class AudioSessionService {
             const devices = await this.getAudioDevices();
             return devices.some(
                 (d) =>
-                    d.name.toLowerCase().includes("cable") ||
-                    d.name.toLowerCase().includes("vb-audio") ||
-                    d.name.toLowerCase().includes("virtual")
+                    d.deviceName.toLowerCase().includes("vb-audio") ||
+                    d.deviceName.toLowerCase().includes("virtual cable") ||
+                    d.name.toLowerCase().includes("cable")
             );
         } catch {
             return false;
@@ -397,29 +410,29 @@ export class AudioSessionService {
     }
 
     /**
-     * Получить имя VB-Cable устройства для ВОСПРОИЗВЕДЕНИЯ (куда направлять звук)
-     * Это "CABLE Input" - playback device
+     * Получить Device Name VB-Cable устройства для ВОСПРОИЗВЕДЕНИЯ
+     * Возвращает Device Name (например "VB-Audio Virtual Cable") для SetAppDefault
      */
     async getVBCableDeviceName(): Promise<string | null> {
         try {
             const devices = await this.getAudioDevices();
-            log.info(`[AudioSession] 🔍 Looking for VB-Cable PLAYBACK device among ${devices.length} devices:`);
-            devices.forEach(d => log.info(`[AudioSession]   - "${d.name}"`));
+            log.info(`[AudioSession] 🔍 Looking for VB-Cable device among ${devices.length} devices:`);
+            devices.forEach(d => log.info(`[AudioSession]   - "${d.name}" → DeviceName: "${d.deviceName}"`));
             
-            // Ищем CABLE Input - это playback устройство куда SoundVolumeView направляет звук
+            // Ищем по deviceName (это то, что нужно для SetAppDefault)
             const vcDevice = devices.find(
                 (d) =>
-                    d.name.toLowerCase().includes("cable input") ||
-                    d.name.toLowerCase().includes("vb-audio virtual cable")
+                    d.deviceName.toLowerCase().includes("vb-audio") ||
+                    d.deviceName.toLowerCase().includes("virtual cable")
             );
 
             if (vcDevice) {
-                log.info(`[AudioSession] ✅ Found VB-Cable PLAYBACK device: "${vcDevice.name}"`);
+                log.info(`[AudioSession] ✅ Found VB-Cable: "${vcDevice.name}" → DeviceName: "${vcDevice.deviceName}"`);
+                return vcDevice.deviceName;  // ← Возвращаем deviceName!
             } else {
-                log.warn("[AudioSession] ⚠️ VB-Cable PLAYBACK device not found");
+                log.warn("[AudioSession] ⚠️ VB-Cable device not found");
+                return null;
             }
-
-            return vcDevice?.name || null;
         } catch (error: any) {
             log.error(`[AudioSession] ❌ Error getting VB-Cable device: ${error.message}`);
             return null;
