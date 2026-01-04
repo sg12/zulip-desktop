@@ -106,6 +106,12 @@ export class SVVLocator {
         paths.push(process.cwd());
         paths.push(path.join(process.cwd(), "tools"));
 
+        // 🆕 В собранном приложении SoundVolumeView.exe находится в resources/tools/
+        if (app.isPackaged) {
+            const resourcesPath = process.resourcesPath || path.join(process.execPath, "..", "resources");
+            paths.push(path.join(resourcesPath, "tools"));
+        }
+
         return paths;
     }
 
